@@ -36,8 +36,8 @@ print(f"输入文件 B: {FILE_B}")
 print(f"输出目录: {OUTPUT_DIR}")
 print("")
 
-# 画布尺寸（从源文件动态读取，见下方）
-FPS = 30
+# 画布尺寸 + FPS（从源文件动态读取）
+FPS = max(src_a.get('fr', 30), src_b.get('fr', 30))
 
 # 时间轴（帧）
 SCENE_A_HOLD_END     = 5
@@ -123,6 +123,11 @@ def extract_layer_meta(layer, source_tag):
     refId = layer.get('refId', '')
     layer_type = layer.get('ty', 2)
 
+    # 提取图层类型特有的字段
+    shapes = layer.get('shapes') if layer_type == 4 else None   # ty=4 形状层
+    lw = layer.get('w')                                          # ty=0 预合成层宽高
+    lh = layer.get('h')
+
     # 映射 refId（支持图像图层ty=2 和 预合成图层ty=0）
     new_refid = refId
     aw, ah = 100, 100
@@ -142,8 +147,12 @@ def extract_layer_meta(layer, source_tag):
         'layer_type': layer_type,
         'refId': new_refid,
         'orig_refId': refId,
-        'position': [p[0] if isinstance(p, list) else 0, p[1] if isinstance(p, list) else 0],
-        'anchor': [a[0] if isinstance(a, list) else 0, a[1] if isinstance(a, list) else 0],
+        'position': [p[0] if isinstance(p, list) else 0,
+                     p[1] if isinstance(p, list) else 0,
+                     p[2] if isinstance(p, list) and len(p) > 2 else 0],
+        'anchor': [a[0] if isinstance(a, list) else 0,
+                   a[1] if isinstance(a, list) else 0,
+                   a[2] if isinstance(a, list) and len(a) > 2 else 0],
         'scale': [s[0] if isinstance(s, list) else s, s[1] if isinstance(s, list) else s, s[2] if isinstance(s, list) and len(s) > 2 else 100],
         'opacity': o if isinstance(o, (int, float)) else 100,
         'rotation': r if isinstance(r, (int, float)) else 0,
@@ -152,6 +161,9 @@ def extract_layer_meta(layer, source_tag):
         'asset_w': aw,
         'asset_h': ah,
         'source_tag': source_tag,
+        'shapes': shapes,    # ty=4 形状层: 原始形状数据
+        'w': lw,            # ty=0 预合成层: 宽高
+        'h': lh,            # ty=0 预合成层: 宽高
     }
 
 # 提取两个文件的所有图层
@@ -288,40 +300,43 @@ def build_pos_kfs(fl, delay, entry_start, exit_start, entry_end, exit_end, initi
     ax, ay = fl['anchor'][0], fl['anchor'][1]
     sx = fl['scale'][0] / 100.0
     sy = fl['scale'][1] / 100.0
-    
+
     (dx_in, dy_in), (dx_os, dy_os) = get_flight_distance(
         x, y, fl['direction'],
         fl['asset_w'], fl['asset_h'],
         ax, ay, sx, sy
     )
-    
+
     entry_x = x + dx_in
     entry_y = y + dy_in
     overshoot_x = x + dx_os if fl['direction'] != "center" else x
     overshoot_y = y + dy_os if fl['direction'] != "center" else y
-    
+
+    # Lottie position 必须是3元素 [x, y, z=0]
+    def pos3(px, py): return [px, py, 0]
+
     kfs = []
-    
+
     # t=0
     if initial_visible:
-        kfs.append(make_kf(0, [x, y], EASE_OUT, EASE_OUT))
+        kfs.append(make_kf(0, pos3(x, y), EASE_OUT, EASE_OUT))
     else:
-        kfs.append(make_kf(0, [entry_x, entry_y], EASE_OUT, EASE_OUT))
-    
+        kfs.append(make_kf(0, pos3(entry_x, entry_y), EASE_OUT, EASE_OUT))
+
     # 退场
     t_exit_start = exit_start
     t_exit_end = t_exit_start + 8
-    kfs.append(make_kf(t_exit_start, [x, y], EASE_IN, EASE_OUT))
-    kfs.append(make_kf(t_exit_end, [entry_x, entry_y], EASE_OUT, EASE_OUT))
-    
+    kfs.append(make_kf(t_exit_start, pos3(x, y), EASE_IN, EASE_OUT))
+    kfs.append(make_kf(t_exit_end, pos3(entry_x, entry_y), EASE_OUT, EASE_OUT))
+
     # 入场
     t_entry = entry_start + delay
     t_entry_end = t_entry + 8
     t_bounce = t_entry_end + 6
-    kfs.append(make_kf(t_entry, [entry_x, entry_y], EASE_IN, EASE_OUT))
-    kfs.append(make_kf(t_entry_end, [overshoot_x, overshoot_y], EASE_SNAPPY_I, EASE_SNAPPY_O))
-    kfs.append(make_kf(t_bounce, [x, y], EASE_OUT, EASE_OUT))
-    
+    kfs.append(make_kf(t_entry, pos3(entry_x, entry_y), EASE_IN, EASE_OUT))
+    kfs.append(make_kf(t_entry_end, pos3(overshoot_x, overshoot_y), EASE_SNAPPY_I, EASE_SNAPPY_O))
+    kfs.append(make_kf(t_bounce, pos3(x, y), EASE_OUT, EASE_OUT))
+
     kfs.sort(key=lambda kf: kf['t'])
     return kfs
 
@@ -377,6 +392,9 @@ def build_fg_keyframes(fg_list, entry_start, entry_end, exit_start, exit_end, in
             'delay': delay,
             'pos_kfs': build_pos_kfs(fl, delay, entry_start, exit_start, entry_end, exit_end, initial_visible),
             'opacity_kfs': build_opacity_kfs(entry_start, exit_start, entry_end, exit_end, delay, initial_visible),
+            'shapes': fl.get('shapes'),   # ty=4 形状层
+            'w': fl.get('w'),             # ty=0 预合成层
+            'h': fl.get('h'),             # ty=0 预合成层
         })
     return result
 
@@ -440,7 +458,18 @@ def make_layer(el, animated=True):
         base["cl"] = cl
     if parent is not None:
         base["parent"] = parent  # 后面在 ind 重新编号后再 remap
-    
+
+    # ty=4 形状层: 必须保留 shapes 数据
+    if el['layer_type'] == 4 and el.get('shapes'):
+        base["shapes"] = el['shapes']
+
+    # ty=0 预合成层: 必须保留 w/h
+    if el['layer_type'] == 0:
+        if el.get('w') is not None:
+            base["w"] = el['w']
+        if el.get('h') is not None:
+            base["h"] = el['h']
+
     if animated:
         base["ks"] = {
             "o": {"a": 1, "k": el['opacity_kfs']},

@@ -3,7 +3,7 @@
 > 每次生成或修改 merged Lottie JSON 后，按此表逐项自查。
 > 后续出现新问题，追加到对应分类下并更新版本号。
 
-**版本**: v1.0 | **日期**: 2026-06-18
+**版本**: v1.2 | **日期**: 2026-06-18
 
 ---
 
@@ -17,6 +17,8 @@
 | 1.4 | **rotation 是否提取** | 元素旋转丢失 | `ks.r.k` 被忽略 | meta 中包含 `rotation` 字段 |
 | 1.5 | **parent 是否提取** | 子元素位置飞到画布外 | `layer.parent` 被忽略，子元素局部坐标被当作绝对坐标 | meta 中包含 `parent` 字段（None 或 int） |
 | 1.6 | **cl 是否提取** | 混合模式/样式丢失 | `layer.cl` 被忽略 | meta 中包含 `cl` 字段 |
+| 1.7 | **ty=4 形状层的 shapes 是否提取** | 渲染器卡死（一直"加载中"）| `extract_layer_meta` 忽略了 `shapes` 字段 | meta 中包含 `shapes` 列表（完整保留源文件结构）|
+| 1.8 | **ty=0 预合成层的 w/h 是否提取** | 渲染器卡死 | `extract_layer_meta` 忽略了 `w`/`h` 字段 | meta 中包含 `asset_w` / `asset_h`（ty=0 时从图层直接取 w/h）|
 
 ---
 
@@ -89,8 +91,9 @@
 | # | 检查项 | 症状 | 根因 | 检查方式 |
 |---|--------|------|------|----------|
 | 8.1 | **非动画属性用 `"a": 0`** | 渲染器行为异常 | 静态属性（anchor/scale/rotation）设了 `"a": 1` | 仅 position 和 opacity 设 `"a": 1` |
-| 8.2 | **position keyframe s 值为2D** | 渲染器报错 | s 值带了3分量 `[x, y, 0]` | 动画 keyframe 的 `s` 统一为 `[x, y]`（2D）；静态属性 `"a": 0` 的 `k` 为 `[x, y, 0]` |
+| 8.2 | **position/anchor 值必须是3元素 [x,y,z]** | **lottie-web 崩溃：Cannot read properties of undefined (reading 'length')** | `extract_layer_meta` 只取了 `[p[0], p[1]]` 2分量；`build_pos_kfs` 中 `make_kf(0, [x,y])` 只传2元素 | **所有 position 和 anchor 值（无论动画关键帧还是静态）都必须是 `[x, y, z=0]` 三元组**，Lottie 规范要求如此 |
 | 8.3 | **opacity keyframe s 值为单元素数组** | 渲染器报错 | s 值为裸数字 `100` | `s` 始终为数组 `[100]` 或 `[0]` |
+| 8.4 | **`build_fg_keyframes` 中转时字段完整性** | 渲染器卡死（形状层/预合成层结构不完整） | 该函数创建新字典时只复制了部分字段，`shapes`/`w`/`h` 在中转过程中丢失 | `build_fg_keyframes` 返回的每个元素必须包含 `shapes`（ty=4 时）和 `w`/`h`（ty=0 时），与 `extract_layer_meta` 提取的字段一一对应 |
 
 ---
 
@@ -109,4 +112,6 @@
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
+| v1.2 | 2026-06-18 | **新增 1.7/1.8（shapes/w/h 字段提取）+ 8.4（build_fg_keyframes 中转字段完整性）**，修复 LottieLab 导出文件合并后白屏/卡死问题（根因确认） |
+| v1.1 | 2026-06-18 | 修正 8.2：position/anchor 必须是3元素 [x,y,z]，2元素会导致 lottie-web 崩溃（根因确认） |
 | v1.0 | 2026-06-18 | 初始版本，收录全部已修复的12类错误 |
