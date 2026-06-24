@@ -1,5 +1,5 @@
 ---
-name: 规范化Lottie动效延展
+name: jd-lottie-anim-extension
 description: 将两个静帧 Lottie JSON 合并为带切帧动效的 Lottie JSON，自动识别静态图层并生成平滑的入场/退场动画。
 version: "2.0.0"
 author: honghaoxiang
