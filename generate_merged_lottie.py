@@ -461,10 +461,21 @@ def build_pos_kfs(l, enter_s, enter_e, exit_s, exit_e, initially_visible, stagge
 # 自查点 7: FADE 帧数影响视觉效果，可改为 s2f(0.15) 更安全
 FADE = 8  # 淡入淡出帧数（100fps 下 = 0.08s，30fps 下 = 0.27s）
 
-def build_opa_kfs(enter_s, enter_e, exit_s, exit_e, initially_visible, stagger=0):
+def build_opa_kfs(enter_s, enter_e, exit_s, exit_e, initially_visible, stagger=0, is_center=False,
+                    cf_start=None):
     es = enter_s + stagger
     xs = exit_s
     if initially_visible:
+        if is_center and cf_start is not None:
+            # ★ center方向A: 对方退场时A就开始入场（交叉溶解）
+            cfs = cf_start
+            return sorted([
+                kf(0,        [100]),
+                kf(xs,       [100], EASE_IN, EASE_IN),   # 正常退场
+                kf(xs+FADE,  [0],   EASE_IN, EASE_IN),
+                kf(cfs,       [0]),                        # 对方退场时A就入场
+                kf(cfs+FADE,  [100], EASE_OUT, EASE_OUT),
+            ], key=lambda k: k['t'])
         return sorted([
             kf(0,        [100]),
             kf(xs,       [100], EASE_IN, EASE_IN),
@@ -473,6 +484,18 @@ def build_opa_kfs(enter_s, enter_e, exit_s, exit_e, initially_visible, stagger=0
             kf(es+FADE,  [100], EASE_OUT, EASE_OUT),
         ], key=lambda k: k['t'])
     else:
+        if is_center and cf_start is not None:
+            # ★ center方向B: 交叉溶解！
+            # 从对方退场时刻(cf_start)就开始入场，与对方退场同步反向渐变
+            # 消除"空窗期闪烁"
+            cfs = cf_start
+            return sorted([
+                kf(0,        [0]),
+                kf(cfs,       [0]),                     # 对方开始退场时B就入场
+                kf(cfs+FADE,  [100], EASE_OUT, EASE_OUT),  # 对方完全消失时B完全显示
+                kf(xs,       [100], EASE_IN, EASE_IN),  # B退场（正常下半周期）
+                kf(xs+FADE,  [0],   EASE_IN, EASE_IN),
+            ], key=lambda k: k['t'])
         return sorted([
             kf(0,        [0]),
             kf(es,       [0]),
@@ -517,9 +540,12 @@ def make_static_layer(l, tag):
     }
     return layer
 
-def make_anim_layer(l, tag, enter_s, enter_e, exit_s, exit_e, initially_visible, stagger=0):
+def make_anim_layer(l, tag, enter_s, enter_e, exit_s, exit_e, initially_visible, stagger=0,
+                    cf_start=None):
+    """cf_start: 交叉溶解起始帧（对方退场时刻），仅 center+B 使用"""
     pos_kfs = build_pos_kfs(l, enter_s, enter_e, exit_s, exit_e, initially_visible, stagger)
-    opa_kfs = build_opa_kfs(enter_s, enter_e, exit_s, exit_e, initially_visible, stagger)
+    is_center = (l.get('dir') == 'center')
+    opa_kfs = build_opa_kfs(enter_s, enter_e, exit_s, exit_e, initially_visible, stagger, is_center, cf_start)
     layer = _layer_base(l, tag)
     layer["ks"] = {
         "o": {"a": 1, "k": opa_kfs},
@@ -547,14 +573,18 @@ def calc_stagger(i, l, H):
     return i * 3 + bonus
 
 for i, l in enumerate(sorted(fg_b, key=lambda l: l['ind'])):
+    _cfs = F_A_EXIT_S if (l.get('dir') == 'center') else None
     out_layers.append(make_anim_layer(l, 'b',
         F_B_ENTER_S, F_B_ENTER_E, F_B_EXIT_S, F_B_EXIT_E,
-        initially_visible=False, stagger=calc_stagger(i, l, H)))
+        initially_visible=False, stagger=calc_stagger(i, l, H),
+        cf_start=_cfs))
 
 for i, l in enumerate(sorted(fg_a, key=lambda l: l['ind'])):
+    _cfs = F_B_EXIT_S if (l.get('dir') == 'center') else None
     out_layers.append(make_anim_layer(l, 'a',
         F_A_ENTER_S, F_A_ENTER_E, F_A_EXIT_S, F_A_EXIT_E,
-        initially_visible=True, stagger=calc_stagger(i, l, H)))
+        initially_visible=True, stagger=calc_stagger(i, l, H),
+        cf_start=_cfs))
 
 for l in static_bot:
     out_layers.append(make_static_layer(l, 'a'))
@@ -607,25 +637,24 @@ with open(OUTPUT, 'w', encoding='utf-8') as f:
     json.dump(output, f, ensure_ascii=False)
 
 # ── 生成预览 HTML（含下载按钮）────────────────────────────────────────────────
+# 修复：使用 jsdelivr CDN（国内可用）+ fetch 加载 JSON（避免内嵌大文件导致问题）
 PREVIEW = os.path.join(OUTPUT_DIR, 'preview.html')
-with open(OUTPUT, 'r', encoding='utf-8') as f:
-    json_str = f.read()
 
-html = '''<!DOCTYPE html>
+html = f'''<!DOCTYPE html>
 <html lang="zh-CN">
 <head><meta charset="UTF-8"><title>Lottie 切换动效预览</title>
 <style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{background:#1a1a2e;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;font-family:-apple-system,sans-serif;color:#eee}
-h2{margin-bottom:16px;font-weight:400;color:#aaa;font-size:16px}
-#lc{width:562px;height:300px;background:#222;border-radius:8px;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,.4)}
-.ctl{margin-top:20px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;justify-content:center}
-button{padding:8px 20px;border:1px solid #555;border-radius:6px;background:#2a2a4a;color:#eee;cursor:pointer;font-size:14px}
-button:hover{background:#3a3a6a}
-.sp button{background:#222}.sp button.active{background:#5a5aff;border-color:#5a5aff}
-#dl-btn{background:#1a4a2a;border-color:#2a7a4a;color:#7ef5a0}
-#dl-btn:hover{background:#1e5a32}
-#fi,#st{font-size:13px;margin-top:10px;min-height:20px}
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{background:#1a1a2e;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;font-family:-apple-system,sans-serif;color:#eee}}
+h2{{margin-bottom:16px;font-weight:400;color:#aaa;font-size:16px}}
+#lc{{width:562px;height:300px;background:#222;border-radius:8px;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,.4)}}
+.ctl{{margin-top:20px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;justify-content:center}}
+button{{padding:8px 20px;border:1px solid #555;border-radius:6px;background:#2a2a4a;color:#eee;cursor:pointer;font-size:14px}}
+button:hover{{background:#3a3a6a}}
+.sp button{{background:#222}}.sp button.active{{background:#5a5aff;border-color:#5a5aff}}
+#dl-btn{{background:#1a4a2a;border-color:#2a7a4a;color:#7ef5a0}}
+#dl-btn:hover{{background:#1e5a32}}
+#fi,#st{{font-size:13px;margin-top:10px;min-height:20px}}
 </style></head>
 <body>
 <h2>Lottie 切换动效预览</h2>
@@ -643,31 +672,79 @@ button:hover{background:#3a3a6a}
 </div>
 <div id="fi"></div>
 <div id="st" style="color:#ff8">加载中...</div>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/lottie-web/5.12.2/lottie.min.js"></script>
 <script>
-var d=''' + json_str + ''';
-var st=document.getElementById('st'),fi=document.getElementById('fi'),anim=null;
-function ss(s){if(anim)anim.setSpeed(s);document.querySelectorAll('.sp button').forEach(function(b){b.classList.remove('active')});document.getElementById('s'+(s+'').replace('.','0')).classList.add('active')}
-function dlJson(){
-  var blob=new Blob([JSON.stringify(d)],{type:'application/json'});
-  var a=document.createElement('a');
-  a.href=URL.createObjectURL(blob);
-  a.download='merged_output.json';
-  a.click();
-  URL.revokeObjectURL(a.href);
-}
-function init(){
-  if(typeof lottie==='undefined'){st.style.color='#f88';st.textContent='Lottie库加载失败，请检查网络';return}
-  try{
-    anim=lottie.loadAnimation({container:document.getElementById('lc'),renderer:'svg',loop:true,autoplay:true,animationData:d});
-    anim.addEventListener('enterFrame',function(){fi.textContent='帧: '+Math.round(anim.currentFrame)+' / '+anim.totalFrames});
-    anim.addEventListener('data_ready',function(){st.style.color='#8f8';st.textContent='✅ 加载完成，正在播放...'});
-    anim.addEventListener('data_failed',function(){st.style.color='#f88';st.textContent='❌ 数据解析失败'});
-    anim.addEventListener('error',function(e){st.style.color='#f88';st.textContent='渲染错误: '+JSON.stringify(e)});
-  }catch(e){st.style.color='#f88';st.textContent='初始化失败: '+e.message}
-}
-if(typeof lottie!=='undefined')init();
-else{var c=0,t=setInterval(function(){if(typeof lottie!=='undefined'){clearInterval(t);init()}else if(++c>80){clearInterval(t);st.style.color='#f88';st.textContent='Lottie加载超时，请刷新'}},100)}
+(function(){{
+  var st=document.getElementById('st'),fi=document.getElementById('fi'),anim=null,jsonData=null;
+  var CDN_URLS=[
+    "https://cdn.jsdelivr.net/npm/lottie-web@5.12.2/build/player/lottie.min.js",
+    "https://cdnjs.cloudflare.com/ajax/libs/lottie-web/5.12.2/lottie.min.js"
+  ];
+  var cdnIdx=0;
+
+  function ss(s){{if(anim)anim.setSpeed(s);document.querySelectorAll('.sp button').forEach(function(b){{b.classList.remove('active')}});document.getElementById('s'+(s+'').replace('.','0')).classList.add('active')}}
+  function dlJson(){{
+    if(!jsonData){{alert('JSON 尚未加载完成，请稍后再试');return}}
+    var blob=new Blob([JSON.stringify(jsonData,null,2)],{{type:'application/json'}});
+    var a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);
+    a.download='merged_output.json';
+    a.style.display='none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function(){{document.body.removeChild(a);URL.revokeObjectURL(a.href)}},100);
+  }}
+
+  function loadCdn(cb){{
+    var s=document.createElement('script');
+    s.src=CDN_URLS[cdnIdx];
+    s.onload=function(){{cb(null)}};
+    s.onerror=function(){{
+      cdnIdx++;
+      if(cdnIdx<CDN_URLS.length){{loadCdn(cb)}}
+      else{{cb(new Error('所有CDN均失败'))}}
+    }};
+    document.head.appendChild(s);
+  }}
+
+  function initAnimation(){{
+    try{{
+      anim=lottie.loadAnimation({{container:document.getElementById('lc'),renderer:'svg',loop:true,autoplay:true,animationData:jsonData}});
+      anim.addEventListener('enterFrame',function(){{fi.textContent='帧: '+Math.round(anim.currentFrame)+' / '+anim.totalFrames}});
+      anim.addEventListener('data_ready',function(){{st.style.color='#8f8';st.textContent='✅ 加载完成，正在播放...'}});
+      anim.addEventListener('data_failed',function(){{st.style.color='#f88';st.textContent='❌ 数据解析失败'}});
+      anim.addEventListener('error',function(e){{st.style.color='#f88';st.textContent='渲染错误: '+(e.error?e.error.message:JSON.stringify(e))}});
+    }}catch(e){{st.style.color='#f88';st.textContent='初始化失败: '+e.message}}
+  }}
+
+  // 第一步：通过 fetch 加载 JSON 文件
+  st.textContent='正在加载动画数据...';
+  fetch('merged_output.json')
+    .then(function(r){{
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      return r.json();
+    }})
+    .then(function(d){{
+      jsonData=d;
+      st.textContent='Lottie库加载中...';
+      // 第二步：加载 lottie-web（优先 jsdelivr，备用 cdnjs）
+      loadCdn(function(err){{
+        if(err){{
+          st.style.color='#f88';
+          st.textContent='❌ Lottie库加载失败: '+err.message+' (请检查网络或刷新重试)';
+          return;
+        }}
+        if(typeof lottie==='undefined'){{
+          st.style.color='#f88';st.textContent='❌ Lottie对象未定义';
+          return;
+        }}
+        initAnimation();
+      }});
+    }})
+    .catch(function(err){{
+      st.style.color='#f88';
+      st.textContent='❌ 数据加载失败: '+err.message;
+    }});
+}})();
 </script>
 </body></html>'''
 

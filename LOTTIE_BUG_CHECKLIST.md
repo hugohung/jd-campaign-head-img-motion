@@ -3,7 +3,7 @@
 > 每次生成或修改 merged Lottie JSON 后，按此表逐项自查。
 > 后续出现新问题，追加到对应分类下并更新版本号。
 
-**版本**: v1.2 | **日期**: 2026-06-18
+**版本**: v1.3 | **日期**: 2026-06-26
 
 ---
 
@@ -43,6 +43,8 @@
 | 3.4 | **退场 position 起始值** | 退场时元素从错误位置飞出 | exit_start 的 position 用了 entry_x 而非原始 x | exit_start kf 的值始终为原始 `[x, y]` |
 | 3.5 | **飞行距离基于视觉边界** | 元素飞出距离过大，飞到画布外 | 用 `CANVAS_W + margin` 绝对偏移 | 基于 `visual_left = pos_x - anchor_x * scale_x` 计算相对偏移 |
 | 3.6 | **scale 归一化用于计算** | 飞行距离计算用原始 scale 值 | scale 值是百分比 | 计算前 `scale_x = s[0] / 100.0`, `scale_y = s[1] / 100.0` |
+| 3.7 | **center 方向元素交叉溶解（无空窗）** | center 元素在切换时闪烁/短暂消失（几帧空白）| B 入场等 A 完全退场后才开始，产生空窗期 | center 方向的 B 在 A **退场开始时刻**就入场（`cf_start=对方exit_s`），A 同理；两者反向渐变实现交叉溶解 |
+| 3.8 | **时间轴 A/B 对称** | A 静置时间远短于 B（如 0.2s vs 3.5s） | `T_A_END`/`T_B_END` 不对称 | T_A_END ≈ T_TOTAL - T_B_END，两画面静置时长接近 |
 
 ---
 
@@ -94,6 +96,8 @@
 | 8.2 | **position/anchor 值必须是3元素 [x,y,z]** | **lottie-web 崩溃：Cannot read properties of undefined (reading 'length')** | `extract_layer_meta` 只取了 `[p[0], p[1]]` 2分量；`build_pos_kfs` 中 `make_kf(0, [x,y])` 只传2元素 | **所有 position 和 anchor 值（无论动画关键帧还是静态）都必须是 `[x, y, z=0]` 三元组**，Lottie 规范要求如此 |
 | 8.3 | **opacity keyframe s 值为单元素数组** | 渲染器报错 | s 值为裸数字 `100` | `s` 始终为数组 `[100]` 或 `[0]` |
 | 8.4 | **`build_fg_keyframes` 中转时字段完整性** | 渲染器卡死（形状层/预合成层结构不完整） | 该函数创建新字典时只复制了部分字段，`shapes`/`w`/`h` 在中转过程中丢失 | `build_fg_keyframes` 返回的每个元素必须包含 `shapes`（ty=4 时）和 `w`/`h`（ty=0 时），与 `extract_layer_meta` 提取的字段一一对应 |
+| 8.5 | **预览 HTML CDN 可用性** | 预览页面空白/卡在"加载中" | 使用 cdnjs.cloudflare.com 在国内企业网被墙/超时，lottie 库无法加载 | 优先 jsdelivr + cdnjs 备用；用 fetch 异步加载 JSON（非内嵌） |
+| 8.6 | **预览下载按钮可用性** | 点击下载按钮无反应 | `<a>` 元素未添加到 DOM 就触发 click，浏览器阻止 | `document.body.appendChild(a)` 后再 `a.click()`；100ms 后 cleanup |
 
 ---
 
@@ -112,6 +116,7 @@
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
+| v1.3 | 2026-06-26 | **新增 3.7（center元素交叉溶解防闪烁）+ 3.8（时间轴对称）+ 8.5（CDN可用性）+ 8.6（下载按钮DOM修复）**；修复预览空白(CDN)、文案闪烁(空窗期)、下载失效(未挂DOM) |
 | v1.2 | 2026-06-18 | **新增 1.7/1.8（shapes/w/h 字段提取）+ 8.4（build_fg_keyframes 中转字段完整性）**，修复 LottieLab 导出文件合并后白屏/卡死问题（根因确认） |
 | v1.1 | 2026-06-18 | 修正 8.2：position/anchor 必须是3元素 [x,y,z]，2元素会导致 lottie-web 崩溃（根因确认） |
 | v1.0 | 2026-06-18 | 初始版本，收录全部已修复的12类错误 |
