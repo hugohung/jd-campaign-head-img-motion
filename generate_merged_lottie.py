@@ -96,11 +96,11 @@ V   = src_a.get('v', '5.7.5')   # ← 保留源文件版本号
 # 自查点 2: 时间轴基于秒定义，s2f() 换算，兼容任意帧率
 def s2f(sec): return round(sec * FPS)
 
-T_TOTAL  = 5.0   # 总时长（秒）
-T_A_END  = 0.2   # A 静置结束
-T_AB_MID = 0.5   # A→B 切换中点
-T_B_END  = 4.0   # B 静置结束
-T_BA_MID = 4.3   # B→A 切换中点
+T_TOTAL  = 5.5   # 总时长（秒）
+T_A_END  = 1.5   # A 静置结束
+T_AB_MID = 2.0   # A→B 切换中点
+T_B_END  = 3.5   # B 静置结束
+T_BA_MID = 4.0   # B→A 切换中点
 
 F_TOTAL     = s2f(T_TOTAL)
 F_A_EXIT_S  = s2f(T_A_END)
@@ -390,18 +390,27 @@ def get_flight_distance(x, y, direction, aw, ah, ax, ay, sx, sy):
     vb = vt + ah * sy
     margin = 80
 
+    # 动态 overshoot 比例（小元素弹得更夸张）
+    visual_area = aw * ah * sx * sy
+    if visual_area < 50000:
+        os_ratio = 0.10
+    elif visual_area < 200000:
+        os_ratio = 0.06
+    else:
+        os_ratio = 0.03
+
     if direction == "left":
-        dx_in = (-margin) - vr     # 右边缘移出左边界
-        return (dx_in, 0), (-dx_in * 0.06, 0)
+        dx_in = (-margin) - vr
+        return (dx_in, 0), (-dx_in * os_ratio, 0)
     elif direction == "right":
-        dx_in = (W + margin) - vl  # 左边缘移出右边界
-        return (dx_in, 0), (-dx_in * 0.06, 0)
+        dx_in = (W + margin) - vl
+        return (dx_in, 0), (-dx_in * os_ratio, 0)
     elif direction == "bottom":
-        dy_in = (H + margin) - vt  # 上边缘移出下边界
-        return (0, dy_in), (0, -dy_in * 0.06)
+        dy_in = (H + margin) - vt
+        return (0, dy_in), (0, -dy_in * os_ratio)
     elif direction == "top":
-        dy_in = (-margin) - vb     # 下边缘移出上边界
-        return (0, dy_in), (0, -dy_in * 0.06)
+        dy_in = (-margin) - vb
+        return (0, dy_in), (0, -dy_in * os_ratio)
     else:
         return (0, 0), (0, 0)
 
@@ -531,15 +540,21 @@ static_bot    = [l for l in static_sorted if l['ind'] >= 5]
 for l in static_top:
     out_layers.append(make_static_layer(l, 'a'))
 
+def calc_stagger(i, l, H):
+    """错帧：索引 + 垂直位置（高处元素先入场）"""
+    y = l['pos'][1]
+    bonus = max(0, int((H - y) / 180))
+    return i * 3 + bonus
+
 for i, l in enumerate(sorted(fg_b, key=lambda l: l['ind'])):
     out_layers.append(make_anim_layer(l, 'b',
         F_B_ENTER_S, F_B_ENTER_E, F_B_EXIT_S, F_B_EXIT_E,
-        initially_visible=False, stagger=i*3))
+        initially_visible=False, stagger=calc_stagger(i, l, H)))
 
 for i, l in enumerate(sorted(fg_a, key=lambda l: l['ind'])):
     out_layers.append(make_anim_layer(l, 'a',
         F_A_ENTER_S, F_A_ENTER_E, F_A_EXIT_S, F_A_EXIT_E,
-        initially_visible=True, stagger=i*3))
+        initially_visible=True, stagger=calc_stagger(i, l, H)))
 
 for l in static_bot:
     out_layers.append(make_static_layer(l, 'a'))
