@@ -1329,10 +1329,13 @@ def _build_preview_html(mode, json_str=None):
         # embedded 版本引用本地 JS 文件（无需联网）
         lib_scripts = '<script src="lottie.min.js"></script>\n<script src="FileSaver.min.js"></script>'
         bootstrap = """st.textContent = 'Lottie库加载中...';
-setTimeout(function() {
-  if (typeof lottie === 'undefined') { st.style.color = '#f88'; st.textContent = '❌ Lottie库未加载，请确保 lottie.min.js 在同一目录'; return; }
-  initAnimation();
-}, 50);"""
+function tryInitLottie(retry) {
+  if (typeof lottie !== 'undefined') { initAnimation(); return; }
+  if (retry > 30) { st.style.color = '#f88'; st.textContent = '❌ Lottie库未加载，请确保 lottie.min.js 在同一目录'; return; }
+  setTimeout(function() { tryInitLottie(retry + 1); }, 100);
+}
+if (document.readyState === 'complete') { tryInitLottie(0); }
+else { window.addEventListener('load', function() { tryInitLottie(0); }); }"""
     else:
         title = 'Lottie 切换动效预览'
         json_line = 'var jsonData = null;\nwindow.__JSON_SIZE__ = "";'
