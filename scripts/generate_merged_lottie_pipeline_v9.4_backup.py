@@ -725,7 +725,7 @@ def _build_pos_kfs_style(l, in_start, in_end, out_start, out_end, W, H, fps):
     if in_start > 0:
         kfs.append(_kf(0, p3(entry_x, entry_y), ei, eo))  # 首帧空帧
 
-    if in_start >= windup_dur_f:
+    if in_start > windup_dur_f:
         # 有完整蓄力：先静止在屏幕外，再往更远处退（蓄力），然后飞入
         kfs.append(_kf(in_start - windup_dur_f, p3(entry_x, entry_y),    ei, eo))  # 蓄力起点（静止在屏幕外）
         kfs.append(_kf(in_start,              p3(in_windup_x, in_windup_y), ei, eo))  # 蓄力完成（往后退）
@@ -782,7 +782,7 @@ def _build_rot_kfs_style(l, in_start, in_end, out_start, out_end, base_rot, fps)
         kfs.append(_kf(0, [base_rot + rot_offset], ei, eo))  # 首帧
 
     # === 入场段 ===
-    if in_start >= windup_dur_f:
+    if in_start > windup_dur_f:
         kfs.append(_kf(in_start - windup_dur_f, [base_rot + rot_offset], ei, eo))  # 蓄力起点
         kfs.append(_kf(in_start,              [in_windup_rot], ei, eo))             # 蓄力完成
     elif in_start > 0:
@@ -1368,7 +1368,7 @@ fetch('merged_output.json?t=' + ts)
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#1a1a2e;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;font-family:-apple-system,sans-serif;color:#eee}
 h2{margin-bottom:16px;font-weight:400;color:#aaa;font-size:16px}
-#lc{width:562px;height:300px;background:#222;border-radius:8px;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,.4)}
+#lc{width:562px;height:300px;background:#222;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,.4)}
 .ctl{margin-top:20px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;justify-content:center}
 button{padding:8px 20px;border:1px solid #555;border-radius:6px;background:#2a2a4a;color:#eee;cursor:pointer;font-size:14px}
 button:hover{background:#3a3a6a}
