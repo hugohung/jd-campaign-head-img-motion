@@ -1,5 +1,5 @@
 """
-Lottie 静帧合并动效 — 分阶段流水线版（V9.5）
+Lottie 静帧合并动效 — 分阶段流水线版（V9.6）
 
 架构：6 阶段解耦流水线，每阶段独立函数 + 中间产物 + 自检 + 局部重跑
   Stage 0 Parse     — 读 JSON · 规范化变换属性 · asset 去重
@@ -103,6 +103,19 @@ def _prefix_asset_ids(assets, prefix):
         new_assets.append(na)
     return new_assets, id_map
 
+def _extract_text_content(layer):
+    """从 ty=5 文字图层提取文本内容和位置，非文字图层返回 None"""
+    if layer.get('ty') != 5:
+        return None
+    try:
+        text = layer['t']['d']['k'][0]['s']['t']
+    except (KeyError, IndexError, TypeError):
+        return None
+    pos = _get_pos(layer.get('ks', {}).get('p', {}))
+    if not text or not isinstance(text, str) or not text.strip():
+        return None
+    return {'pos': pos, 'text': text.strip()}
+
 def _extract_layer(layer, id_map):
     """从源图层提取规范化元数据"""
     ks = layer.get('ks', {})
@@ -198,6 +211,10 @@ def stage_parse(file_a, file_b):
     layers_a = [_extract_layer(l, id_map_a) for l in src_a.get('layers', [])]
     layers_b = [_extract_layer(l, id_map_b) for l in src_b.get('layers', [])]
 
+    # 提取文字图层（ty=5）的文本内容（V9.6: 用于关键词自动识别装饰/突出元素）
+    text_layers_a = [t for t in (_extract_text_content(l) for l in src_a.get('layers', [])) if t]
+    text_layers_b = [t for t in (_extract_text_content(l) for l in src_b.get('layers', [])) if t]
+
     # 签名 + 尺寸
     for l in layers_a:
         l['_sig'] = _get_asset_sig(assets_a, l['refId'])
@@ -238,6 +255,8 @@ def stage_parse(file_a, file_b):
         'assets': all_assets,
         'layers_a': layers_a,
         'layers_b': layers_b,
+        'text_layers_a': text_layers_a,
+        'text_layers_b': text_layers_b,
         'dedup_count': len(_asset_id_remap),
     }
 
@@ -306,6 +325,16 @@ _SEMANTIC_KEYWORDS = {
     'text':       ['补贴', '领千元', '感叹号', 'title', '标题', '文案', '价格', '优惠', '满减', '折扣'],
     'decoration': ['气球', '星星', '五角星', 'joy', 'star', 'balloon', '装饰', '彩带', '烟花', '光效'],
 }
+
+# 文字图层内容关键词 → 自动映射到空间最近的图片图层（V9.6）
+_TEXT_DECO_KEYWORDS = [
+    '装饰', '氛围', '背景装饰', '彩带', '烟花', '光效', '星星', '气球',
+    'decoration', 'deco', 'bg',
+]
+_TEXT_HIGHLIGHT_KEYWORDS = [
+    '核心利益点', '核心', '焦点', '主推', '重点', '利益点', '爆品', '主打',
+    'highlight', 'focus', 'key', 'hero',
+]
 
 def _classify_semantic(nm):
     """根据图层名判断语义类型，返回类型名或 None"""
@@ -424,6 +453,60 @@ def _auto_group(fg_layers, W, H):
 
     return group_dirs, group_members
 
+def _auto_detect_deco_highlight(text_layers, fg_layers, tag, W):
+    """扫描文字图层内容，匹配装饰/核心利益点关键词，
+    映射到空间最近的图片图层，返回 (auto_deco, auto_highlight)。
+    
+    auto_deco: [(tag, ind), ...]  对应 --deco 格式
+    auto_highlight: [(tag, ind, 'scale'), ...]  对应 --highlight 格式
+    
+    映射规则：文字图层匹配到关键词后，找最近的前景图片图层（距离 < W*0.3）。
+    tag 为 'a' 或 'b'，表示 fg_layers 的归属。
+    """
+    if not text_layers or not fg_layers:
+        return [], []
+    
+    auto_deco = []
+    auto_highlight = []
+    threshold = W * 0.3
+    
+    for tl in text_layers:
+        t = tl['text'].lower()
+        tx, ty = tl['pos'][0], tl['pos'][1]
+        
+        # 匹配关键词类型
+        match_type = None
+        if any(k in t for k in _TEXT_DECO_KEYWORDS):
+            match_type = 'deco'
+        elif any(k in t for k in _TEXT_HIGHLIGHT_KEYWORDS):
+            match_type = 'highlight'
+        else:
+            continue
+        
+        # 找最近的前景图片图层
+        best_fg = None
+        best_dist = float('inf')
+        for fg in fg_layers:
+            fx, fy = fg['pos'][0], fg['pos'][1]
+            dist = ((fx - tx) ** 2 + (fy - ty) ** 2) ** 0.5
+            if dist < best_dist:
+                best_dist = dist
+                best_fg = fg
+        
+        if best_fg and best_dist < threshold:
+            ind = best_fg.get('ind', 0)
+            if ind:
+                if match_type == 'deco':
+                    auto_deco.append((tag, ind))
+                else:
+                    auto_highlight.append((tag, ind, 'scale'))
+    
+    # 去重
+    auto_deco = list(dict.fromkeys(auto_deco))
+    auto_highlight = list(dict.fromkeys(auto_highlight))
+    
+    return auto_deco, auto_highlight
+
 def stage_classify(parse_out, output_dir=None):
     """Stage 1: 静态识别 + 前景分组 + 方向（带 L1 分组 + L2 覆盖）"""
     W = parse_out['meta']['w']
@@ -472,6 +555,14 @@ def stage_classify(parse_out, output_dir=None):
         if 'group_id' not in l:
             l['group_id'] = None
 
+    # V9.6: 文字图层关键词 → 自动识别装饰/突出元素
+    auto_deco_a, auto_highlight_a = _auto_detect_deco_highlight(
+        parse_out.get('text_layers_a', []), fg_a, 'a', W)
+    auto_deco_b, auto_highlight_b = _auto_detect_deco_highlight(
+        parse_out.get('text_layers_b', []), fg_b, 'b', W)
+    auto_deco = auto_deco_a + auto_deco_b
+    auto_highlight = auto_highlight_a + auto_highlight_b
+
     # 记录分组信息（用于中间产物 + 自检输出）
     return {
         'meta': parse_out['meta'],
@@ -484,6 +575,9 @@ def stage_classify(parse_out, output_dir=None):
         'group_dirs_a': a_group_dirs,
         'group_dirs_b': b_group_dirs,
         'has_overrides': has_overrides,
+        'auto_deco': auto_deco,
+        'auto_highlight': auto_highlight,
+        'has_text_layers': bool(parse_out.get('text_layers_a') or parse_out.get('text_layers_b')),
     }
 
 def stage_classify_check(d):
@@ -503,7 +597,19 @@ def stage_classify_check(d):
         all_groups.setdefault(gid, []).append(l['nm'])
     group_summary = ' | '.join(f'{gid}: {",".join(nms[:3])}{"..." if len(nms)>3 else ""}' for gid, nms in all_groups.items())
     override_tag = ' [含人工覆盖]' if d.get('has_overrides') else ''
-    _ok(1, f'静态={len(d["static_pairs"])}对 A前景={len(d["fg_a"])} B前景={len(d["fg_b"])} 分组={len(all_groups)}组{override_tag}')
+    text_tag = ' 检测到文字图层' if d.get('has_text_layers') else ''
+    auto_deco = d.get('auto_deco', [])
+    auto_highlight = d.get('auto_highlight', [])
+    auto_tag = ''
+    if auto_deco or auto_highlight:
+        parts = []
+        if auto_deco:
+            parts.append(f'装饰={len(auto_deco)}')
+        if auto_highlight:
+            parts.append(f'突出={len(auto_highlight)}')
+        auto_tag = f' 自动识别({", ".join(parts)})'
+    
+    _ok(1, f'静态={len(d["static_pairs"])}对 A前景={len(d["fg_a"])} B前景={len(d["fg_b"])} 分组={len(all_groups)}组{override_tag}{text_tag}{auto_tag}')
     print(f'    分组详情: {group_summary}')
 
 
@@ -1529,7 +1635,8 @@ STAGE_FILES = {
 }
 
 def run_pipeline(file_a, file_b, output_dir, from_stage=0, to_stage=6, timeline_params=None, deco_items=None, highlight_items=None):
-    """运行流水线，支持局部重跑"""
+    """运行流水线，支持局部重跑。
+    返回 (output_path, meta_info) 其中 meta_info 包含 auto_deco/auto_highlight 信息。"""
     os.makedirs(output_dir, exist_ok=True)
     pipe_dir = os.path.join(output_dir, PIPELINE_DIR)
     os.makedirs(pipe_dir, exist_ok=True)
@@ -1554,6 +1661,18 @@ def run_pipeline(file_a, file_b, output_dir, from_stage=0, to_stage=6, timeline_
         classify_out = _read_json(os.path.join(output_dir, STAGE_FILES[1]))
         print(f"⏭️  [Stage 1] 复用 {STAGE_FILES[1]}")
 
+    # V9.6: 如果用户未指定 --deco/--highlight，使用自动检测结果
+    auto_deco = classify_out.get('auto_deco', [])
+    auto_highlight = classify_out.get('auto_highlight', [])
+    effective_deco = deco_items if deco_items else auto_deco
+    effective_highlight = highlight_items if highlight_items else auto_highlight
+
+    if effective_deco or effective_highlight:
+        if effective_deco == auto_deco and auto_deco:
+            print(f"\n🔍 自动识别装饰元素: {[f'{t}_{i}' for t,i in effective_deco]}")
+        if effective_highlight == auto_highlight and auto_highlight:
+            print(f"🔍 自动识别突出元素: {[f'{t}_{i}' for t,i,_ in effective_highlight]}")
+
     # ── Stage 2 ──
     if from_stage <= 2 <= to_stage:
         timeline_out = stage_timeline(classify_out, timeline_params)
@@ -1574,9 +1693,23 @@ def run_pipeline(file_a, file_b, output_dir, from_stage=0, to_stage=6, timeline_
 
     # ── Stage 4 ──
     if from_stage <= 4 <= to_stage:
-        hold_out = stage_hold_anim(keyframes_out, deco_items, highlight_items)
-        stage_hold_anim_check(hold_out)
-        _write_json(os.path.join(output_dir, STAGE_FILES[4]), hold_out)
+        if effective_deco or effective_highlight:
+            hold_out = stage_hold_anim(keyframes_out, effective_deco, effective_highlight)
+            stage_hold_anim_check(hold_out)
+            _write_json(os.path.join(output_dir, STAGE_FILES[4]), hold_out)
+        else:
+            # 无展示动效，跳过 Stage 4
+            print(f"\n⏭️  [Stage 4] 跳过 — 未指定展示动效参数，也未从文字图层自动识别到装饰/突出元素")
+            # 创建空的 hold_anim 输出（= keyframes 输出）
+            hold_out = {
+                'meta': keyframes_out['meta'],
+                'assets': keyframes_out['assets'],
+                'timeline_params': keyframes_out['timeline_params'],
+                'layers': deepcopy(keyframes_out['layers']),
+                'deco_applied': [],
+                'highlight_applied': [],
+            }
+            _write_json(os.path.join(output_dir, STAGE_FILES[4]), hold_out)
     else:
         hold_out = _read_json(os.path.join(output_dir, STAGE_FILES[4]))
         print(f"⏭️  [Stage 4] 复用 {STAGE_FILES[4]}")
@@ -1602,6 +1735,15 @@ def run_pipeline(file_a, file_b, output_dir, from_stage=0, to_stage=6, timeline_
         print(f"✅ 预览(内嵌): {preview_embedded}  (双击打开)")
 
     print(f"\n━━━ 流水线完成 ━━━")
+
+    # 返回元信息供调用方判断是否需要提示用户
+    return output_path, {
+        'auto_deco': auto_deco,
+        'auto_highlight': auto_highlight,
+        'effective_deco': effective_deco,
+        'effective_highlight': effective_highlight,
+        'has_text_layers': classify_out.get('has_text_layers', False),
+    }
 
 
 def main():
@@ -1631,9 +1773,17 @@ def main():
         if not args.file_a or not args.file_b:
             parser.error('全跑模式需要 file_a 和 file_b 参数\n  用法: python generate_merged_lottie_pipeline.py a.json b.json output/')
 
-    run_pipeline(args.file_a, args.file_b, args.output_dir,
-                 args.from_stage, args.to_stage,
-                 deco_items=deco_items, highlight_items=highlight_items)
+    _, meta = run_pipeline(args.file_a, args.file_b, args.output_dir,
+                           args.from_stage, args.to_stage,
+                           deco_items=deco_items, highlight_items=highlight_items)
+
+    # V9.6: 如果没有展示动效，输出引导提示
+    if not meta['effective_deco'] and not meta['effective_highlight']:
+        print()
+        print("💡 提示：当前未添加展示阶段动效。")
+        print("   如果你希望某些元素有装饰晃动或核心利益点缩放效果，")
+        print("   可以截图指出需要浮动的装饰元素，或者需要重点突出的核心利益点，")
+        print("   告诉我图层的编号，我会用 --deco 或 --highlight 参数重新生成。")
 
 if __name__ == '__main__':
     main()
