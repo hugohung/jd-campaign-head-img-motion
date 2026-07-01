@@ -1,7 +1,7 @@
 ---
 name: jd-lottie-anim-extension
 description: 将两个静帧 Lottie JSON 合并为带切帧动效的 Lottie JSON，分阶段流水线架构，自动分组+弹性动效+预览模板。
-version: "9.6.1"
+version: "9.6.2"
 author: honghaoxiang
 agent_created: true
 trigger:
@@ -34,11 +34,12 @@ python scripts/generate_merged_lottie_pipeline.py a.json b.json output/ --deco A
 
 **必须遵守的规则：**
 1. **Python 路径**：用 `C:\Users\honghaoxiang\.workbuddy\binaries\python\versions\3.13.12\python.exe`
-2. **输出目录默认值**：不传第三个参数时，输出到 `./output`
+2. **输出目录**：默认 `./output`
 3. **运行后**：脚本自动下载 `lottie.min.js` + `FileSaver.min.js` 到输出目录，生成预览+自检
-4. **fps 不一致处理**：两个源文件 fps 不同时，输出取 `max(A.fps, B.fps)`。源文件是静帧无动画，所有动效时长以秒定义按输出 fps 换算，30/60/100fps 下视觉节奏完全一致
-5. **`--deco` 参数**：指定装饰元素，格式 `A_8,A_9,B_5,B_8`（A/B 为画面，数字为图层原始索引）
-6. **`--highlight` 参数**：指定突出元素，格式 `A_5:scale,B_4:scale`（type 字段保留但统一只做缩放动画）
+4. **fps 不一致**：取 `max(A.fps, B.fps)`，时长按秒定义自适应换算（详见时长区间）
+5. **`--deco`**：装饰元素 `A_8,A_9,B_5,B_8`（画面+图层原始索引）
+6. **`--highlight`**：突出元素 `A_5:scale,B_4:scale`
+7. **⚠️ 展示预览用 `preview_embedded.html`**：fetch 版在 `file://` 下会 Failed to fetch，给用户看只给 embedded 版
 
 ## 分阶段流水线架构（核心）
 
@@ -281,6 +282,7 @@ T_HIGHLIGHT_SCALE   = (1.00, 1.20)  # 缩放幅度
 2. **本地依赖** — embedded 版本自动下载 `lottie.min.js` + `FileSaver.min.js` 到输出目录，彻底避免 CDN 失败问题
 3. **生成后自检** — 检查 saveAs/saveAs全局/降级方案/__JSON_SIZE__，缺任一项报错退出
 4. **禁止手写预览 HTML** — 必须从脚本生成
+5. **⚠️ 展示预览必须用 `preview_embedded.html`** — `preview.html` 的 fetch 模式在 `file://` 协议下被浏览器拦截（Failed to fetch），会导致用户看到白屏/加载失败。所有给用户看的预览链接始终指向 `preview_embedded.html`
 
 ## 输出物
 
@@ -346,22 +348,15 @@ windup_ratio = 0.15                       # 蓄力幅度
 
 ```
 jd-lottie-anim-extension/
-├── SKILL.md                                  # 本文件
+├── SKILL.md                               # 本文件
 ├── README.md
+├── CHANGELOG.md
 ├── LICENSE
 ├── scripts/
-│   ├── generate_merged_lottie_pipeline.py    # 主脚本（流水线版 V9.4）
-│   ├── generate_merged_lottie.py             # 旧版脚本（V8，保留备用）
-│   ├── generate_merged_lottie_pipeline_v9.4_backup.py  # V9.4 备份
-│   ├── generate_merged_lottie_pipeline_v9.3_backup.py  # V9.3 备份
-│   ├── generate_merged_lottie_pipeline_v9.2_backup.py  # V9.2 备份
-│   ├── generate_merged_lottie_pipeline_v8.1_backup.py  # V8.1 备份
-│   └── generate_merged_lottie_v8_backup.py   # V8 旧版备份
+│   └── generate_merged_lottie_pipeline.py # 主脚本（流水线架构）
 ├── references/
-│   ├── .gitkeep
 │   └── LOTTIE_BUG_CHECKLIST.md
 └── examples/
-    ├── .gitkeep
     ├── scene-a.json
     ├── scene-b.json
     ├── expected-output.json
@@ -370,46 +365,20 @@ jd-lottie-anim-extension/
 
 ## 版本历史
 
-| 版本 | 日期 | 主要变更 |
-|------|------|----------|
-| V9.6.1 | 2026-07-01 | **修复预览模板速度按钮高亮丢失**：`ss()` 函数生成的 `btnId` 与按钮实际 `id` 不匹配（`0.5`→`s005` vs `s05`），导致点击任何速度按钮后 active 类被移除但无法重新添加。统一按钮 id 为 `s0.5`/`s1`/`s2`，`ss()` 改为 `btnId = 's' + s` |
-| V9.6 | 2026-07-01 | **文字图层关键词自动识别装饰/突出元素**：Stage 0 新增 `_extract_text_content()` 扫描 ty=5 文字图层获取实际文本内容；Stage 1 新增 `_auto_detect_deco_highlight()` 将匹配关键词（`装饰`/`核心利益点`/`主推`/`爆品` 等）的文字图层空间映射到最近图片图层，自动应用展示动效；无文字图层或无匹配时跳过 Stage 4 并输出引导提示（可截图指定图层编号后用 `--deco`/`--highlight` 重跑）；图层名语义匹配不再直接触发展示动效，仅用于分组方向判断 |
-| V9.4 | 2026-06-30 | **展示阶段动效定稿**：参数化指定 `--deco` 装饰元素和 `--highlight` 突出元素；装饰元素匀速环形晃动+持续旋转（线性缓动，参考0610.json画画/植物）；突出元素缩放两下 100%-120%（以图片中心为缩放中心）；删除自动识别（避免空名误伤），改为提问确认+参数指定；embedded预览改本地依赖（自动下载 lottie.min.js/FileSaver.min.js，无需联网）；修复 `_build_pos/rot_kfs_style` 中 `in_start == windup_dur_f` 导致 t=0 重复关键帧的 bug；移除预览容器 `#lc` 的 `border-radius` 避免满宽元素（如腰带）被裁切 |
-| V9.3 | 2026-06-30 | **全面fps自适应**：退场蓄力下限max(2帧)改T_WINDUP_MIN秒定义；淡入淡出0.07/0.10硬编码改T_FADE常量；最小展示0.6硬编码改T_MIN_HOLD常量；废弃_calc_stagger_ref改秒定义；30fps+100fps交叉验证节奏一致 |
-| V9.2 | 2026-06-30 | **fps自适应+静态识别修复**：所有时长改秒定义按fps换算（修复100fps下节奏太快/蓄力不可见）；静态识别改用asset尺寸(aw/ah)代替base64比对（修复lottielab重导出导致的漏判）；分组bug修复（空名nm做dict key互相覆盖导致所有元素同方向） |
-| V9.1 | 2026-06-30 | 分阶段流水线架构（6阶段解耦+中间产物+自检+局部重跑）；参考动效风格（两段式交叉+首尾空帧+蓄力+overshoot+bounce+退场蓄力）；L1纯代码分组（语义匹配+空间聚类）+L2人工微调；预览模板固化（单一函数+自检+JSON大小显示） |
-| V8.1 | 2026-06-30 | 预览模板固化：fetch/embedded 合并 build_preview_html()，生成后自检 |
-| V8.0 | 2026-06-29 | 预览优化：toggle按钮、FileSaver.js、回归V6时间轴 |
-| V9实验 | 2026-06-29 | 参考动效分析尝试，因元素不可见回滚（教训：A组opacity别设0首帧） |
-| V7.x | 2026-06-24~26 | 7维度静态识别、center交叉溶解、CDN修复 |
-| V6 | 2026-06-18 | position/scale 3分量、视觉边界飞行距离、弹性缓动 |
-| V1-V5 | 2026-06-17~18 | 基础功能、parent保留、anchor/rotation/cl修复 |
+详见 `CHANGELOG.md`。当前版本 V9.6.1。
 
 ## 排错速查
 
+常见问题快速定位，完整排查清单见 `references/LOTTIE_BUG_CHECKLIST.md`。
+
 | 症状 | 最可能原因 | 解决方法 |
 |------|-----------|---------|
-| 预览白屏 | CDN 加载失败 | 检查网络；预览页有双CDN兜底 |
-| 按钮无效 | JS 函数在 IIFE 内 | 确认所有函数是全局声明 |
-| 闪烁 | 循环衔接缺锚点 | t=F_TOTAL 处补入首帧锚点（脚本自动处理） |
-| 元素位置偏移 | anchor 丢失或2元素position | 检查源文件anchor、position是否3元素 |
-| 下载跳转网页 | 丢 FileSaver 逻辑 | 已固化：单一模板+自检，不会丢 |
-| 背景消失 | 背景被识别为前景 | 检查两源文件背景层位置/内容是否匹配 |
-| 同组元素方向不一致 | L1分组不准 | 用 group_config.json 手工微调，`--from 2` 重跑 |
-| 元素不可见 | A组opacity设了0首帧 | A组必须恒定100，位置控制空帧 |
-| B组退场被截断 | out_end 超过 F_TOTAL | assign_timeline 的 max_out 约束 |
-| **节奏太快/太硬** | 非30fps时固定帧数没缩放 | V9.2已修：时长全用秒定义，按fps自动换算 |
-| **蓄力看不见** | 蓄力时长固定2f，高fps下<0.03s | V9.2已修：T_WINDUP=0.08s，按fps换算 |
-| **静态层被赋予动效** | base64不一致导致漏判 | V9.2已修：改用 asset尺寸(aw/ah) 判断静态 |
-| **所有元素同方向** | 图层名为空时nm做dict key互相覆盖 | V9.2已修：_auto_group直接设图层属性 |
-| **满宽素材边缘被裁剪 👈 核心元凶** | 源文件 WebP 图片被误标为 PNG，且实际尺寸 < asset 记录的 w/h → 渲染器无法正确拉伸 | **V9.5 自动修复**：Stage 0 检测 WebP → 缩放至目标尺寸 → 转 PNG |
+| 预览白屏 | CDN 加载失败 | 检查网络；双CDN兜底；或用 embedded 版离线打开 |
+| 按钮无效 | JS 函数在 IIFE 内 | 确认所有函数全局声明（脚本已固化处理） |
+| A组元素不可见 | opacity 设了 0 首帧 | A组必须恒定 100，位置控制空帧（脚本已固化处理） |
+| 满宽素材边缘被裁切 | 源文件 WebP 被误标 PNG | V9.5+ Stage 0 自动检测并修复 |
+| 其他问题 | — | [排查清单](references/LOTTIE_BUG_CHECKLIST.md) |
 
 ## 备份与回滚
 
-| 版本 | 备份文件 | 回滚命令 |
-|------|---------|---------|
-| V9.4 流水线 | `generate_merged_lottie_pipeline_v9.4_backup.py` | `cp generate_merged_lottie_pipeline_v9.4_backup.py generate_merged_lottie_pipeline.py` |
-| V9.3 流水线 | `generate_merged_lottie_pipeline_v9.3_backup.py` | `cp generate_merged_lottie_pipeline_v9.3_backup.py generate_merged_lottie_pipeline.py` |
-| V9.2 流水线 | `generate_merged_lottie_pipeline_v9.2_backup.py` | `cp generate_merged_lottie_pipeline_v9.2_backup.py generate_merged_lottie_pipeline.py` |
-| V8.1 流水线 | `generate_merged_lottie_pipeline_v8.1_backup.py` | `cp generate_merged_lottie_pipeline_v8.1_backup.py generate_merged_lottie_pipeline.py` |
-| V8 旧版 | `generate_merged_lottie_v8_backup.py` | `cp generate_merged_lottie_v8_backup.py generate_merged_lottie.py` |
+通过 Git 历史回滚，详见 `CHANGELOG.md`。
