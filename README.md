@@ -1,4 +1,4 @@
-# 规范化 Lottie 动效延展 (jd-lottie-anim-extension)
+# 京东会场头图 Lottie 动效延展 (jd-campaign-head-img-motion)
 
 > 将两个静帧 Lottie JSON 合并为带切帧动效的 Lottie JSON，自动识别静态图层并生成平滑的入场/退场动画。
 
@@ -99,7 +99,7 @@ cd examples && python -m http.server 8770
 ## 项目结构
 
 ```
-jd-lottie-anim-extension/
+jd-campaign-head-img-motion/
 ├── SKILL.md                        # AI 指令文档
 ├── README.md                       # 本文件
 ├── LICENSE                         # MIT 协议
