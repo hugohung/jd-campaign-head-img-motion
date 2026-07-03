@@ -2,6 +2,10 @@
 
 > 将两个静帧 Lottie JSON 合并为带切帧动效的 Lottie JSON，自动识别静态图层并生成平滑的入场/退场动画。
 
+## 效果演示
+
+<video src="assets/demo.mp4" controls width="100%" poster="assets/demo.mp4"></video>
+
 ## 功能特性
 
 - 🎯 **自动识别静态图层** — 背景、腰封等不变元素自动保持不动
