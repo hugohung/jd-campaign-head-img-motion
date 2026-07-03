@@ -4,7 +4,7 @@
 
 ## 效果演示
 
-<video src="assets/demo.mp4" controls width="100%" poster="assets/demo.mp4"></video>
+<video src="https://raw.githubusercontent.com/hugohung/jd-campaign-head-img-motion/main/assets/demo.mp4" controls width="100%"></video>
 
 ## 功能特性
 
