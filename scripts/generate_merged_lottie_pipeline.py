@@ -1,5 +1,5 @@
 """
-Lottie 静帧合并动效 — 分阶段流水线版（V9.6）
+Lottie 静帧合并动效 — 分阶段流水线版（V9.7.1）
 
 架构：6 阶段解耦流水线，每阶段独立函数 + 中间产物 + 自检 + 局部重跑
   Stage 0 Parse     — 读 JSON · 规范化变换属性 · asset 去重
@@ -1456,9 +1456,10 @@ def stage_assemble_check(output, loop_fixed):
 # Stage 5: Preview — 单一模板生成 fetch/embedded 预览
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _build_preview_html(mode, output, json_str=None):
+def _build_preview_html(mode, output, output_dir=None, json_str=None):
     """单一模板：fetch/embedded 共用，仅 jsonData 赋值方式不同。
     output 用于读取 w/h 动态计算预览尺寸。"""
+    assert mode in ('fetch', 'embedded'), f'unknown mode: {mode}'
     assert mode in ('fetch', 'embedded'), f'unknown mode: {mode}'
     # 预览尺寸：原尺寸 ≤ 800px 宽度用 1x，否则 0.5x
     src_w, src_h = output.get('w', 1125), output.get('h', 600)
@@ -1481,16 +1482,30 @@ def _build_preview_html(mode, output, json_str=None):
         else:
             size_str = f'{size_bytes / 1024:.0f} KB'
         json_line = f'var jsonData = {json_str};\nwindow.__JSON_SIZE__ = "{size_str}";'
-        # embedded 版本引用本地 JS 文件（无需联网）
-        lib_scripts = '<script src="lottie.min.js"></script>\n<script src="FileSaver.min.js"></script>'
-        bootstrap = """st.textContent = 'Lottie库加载中...';
-function tryInitLottie(retry) {
-  if (typeof lottie !== 'undefined') { initAnimation(); return; }
-  if (retry > 30) { st.style.color = '#f88'; st.textContent = '❌ Lottie库未加载，请确保 lottie.min.js 在同一目录'; return; }
-  setTimeout(function() { tryInitLottie(retry + 1); }, 100);
-}
-if (document.readyState === 'complete') { tryInitLottie(0); }
-else { window.addEventListener('load', function() { tryInitLottie(0); }); }"""
+        # embedded 版本：将 lottie.min.js 和 FileSaver.min.js 内联到 HTML 中
+        # 避免 file:// 协议下外部脚本加载被浏览器安全策略阻止
+        lottie_path = os.path.join(output_dir, 'lottie.min.js') if output_dir else 'lottie.min.js'
+        fs_path = os.path.join(output_dir, 'FileSaver.min.js') if output_dir else 'FileSaver.min.js'
+        inline_scripts = []
+        try:
+            with open(lottie_path, 'r', encoding='utf-8') as f:
+                lottie_src = f.read()
+            inline_scripts.append(f'<script>\n{lottie_src}\n</script>')
+        except Exception as e:
+            print(f'⚠️ 内联 lottie.min.js 失败: {e}，回退到外部引用')
+            inline_scripts.append('<script src="lottie.min.js"></script>')
+        try:
+            with open(fs_path, 'r', encoding='utf-8') as f:
+                fs_src = f.read()
+            inline_scripts.append(f'<script>\n{fs_src}\n</script>')
+        except Exception as e:
+            print(f'⚠️ 内联 FileSaver.min.js 失败: {e}，回退到外部引用')
+            inline_scripts.append('<script src="FileSaver.min.js"></script>')
+        lib_scripts = '\n'.join(inline_scripts)
+        bootstrap = """st.textContent = '初始化动画...';
+if (typeof lottie === 'undefined') { st.style.color = '#f88'; st.textContent = '❌ Lottie库未加载（脚本内联失败）'; }
+else if (document.readyState === 'complete') { initAnimation(); }
+else { window.addEventListener('load', function() { initAnimation(); }); }"""
     else:
         title = 'Lottie 切换动效预览' + aspect_hint
         json_line = 'var jsonData = null;\nwindow.__JSON_SIZE__ = "";'
@@ -1610,9 +1625,9 @@ def stage_preview(output, output_dir):
             print(f"  ⚠️ 下载 {filename} 失败: {e}")
     
     with open(preview_fetch, 'w', encoding='utf-8') as f:
-        f.write(_build_preview_html('fetch', output))
+        f.write(_build_preview_html('fetch', output, output_dir))
     with open(preview_embedded, 'w', encoding='utf-8') as f:
-        f.write(_build_preview_html('embedded', output, json_str))
+        f.write(_build_preview_html('embedded', output, output_dir, json_str))
     
     return preview_fetch, preview_embedded
 
