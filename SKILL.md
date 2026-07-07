@@ -1,7 +1,7 @@
 ---
 name: jd-campaign-head-img-motion
 description: 京东会场头图 Lottie 动效延展，将两个静帧 Lottie JSON 合并为带切帧动效的 Lottie JSON，分阶段流水线架构，自动分组+弹性动效+预览模板。
-version: "9.6.2"
+version: "9.7.0"
 author: honghaoxiang
 agent_created: true
 trigger:
@@ -365,7 +365,7 @@ jd-lottie-anim-extension/
 
 ## 版本历史
 
-详见 `CHANGELOG.md`。当前版本 V9.6.1。
+详见 `CHANGELOG.md`。当前版本 V9.7.0。
 
 ## 排错速查
 

@@ -1456,12 +1456,24 @@ def stage_assemble_check(output, loop_fixed):
 # Stage 5: Preview — 单一模板生成 fetch/embedded 预览
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _build_preview_html(mode, json_str=None):
-    """单一模板：fetch/embedded 共用，仅 jsonData 赋值方式不同"""
+def _build_preview_html(mode, output, json_str=None):
+    """单一模板：fetch/embedded 共用，仅 jsonData 赋值方式不同。
+    output 用于读取 w/h 动态计算预览尺寸。"""
     assert mode in ('fetch', 'embedded'), f'unknown mode: {mode}'
+    # 预览尺寸：原尺寸 ≤ 800px 宽度用 1x，否则 0.5x
+    src_w, src_h = output.get('w', 1125), output.get('h', 600)
+    if hasattr(src_w, 'get'):  # 防御：某些序列化后 w 可能是 dict
+        src_w, src_h = 1125, 600
+    if src_w <= 800:
+        preview_w, preview_h = int(src_w), int(src_h)
+        aspect_hint = ''
+    else:
+        preview_w, preview_h = int(src_w // 2), int(src_h // 2)
+        aspect_hint = f' (原尺寸: {src_w}×{src_h})'
+
     if mode == 'embedded':
         assert json_str is not None, 'embedded 模式需要 json_str'
-        title = 'Lottie 切换动效预览（内嵌模式）'
+        title = 'Lottie 切换动效预览（内嵌模式）' + aspect_hint
         # 计算 JSON 文件大小（bytes → KB/MB）
         size_bytes = len(json_str.encode('utf-8'))
         if size_bytes >= 1024 * 1024:
@@ -1480,7 +1492,7 @@ function tryInitLottie(retry) {
 if (document.readyState === 'complete') { tryInitLottie(0); }
 else { window.addEventListener('load', function() { tryInitLottie(0); }); }"""
     else:
-        title = 'Lottie 切换动效预览'
+        title = 'Lottie 切换动效预览' + aspect_hint
         json_line = 'var jsonData = null;\nwindow.__JSON_SIZE__ = "";'
         # fetch 版本不内嵌本地库，继续使用 CDN 加载
         lib_scripts = ''
@@ -1514,7 +1526,7 @@ fetch('merged_output.json?t=' + ts)
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#1a1a2e;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;font-family:-apple-system,sans-serif;color:#eee}
 h2{margin-bottom:16px;font-weight:400;color:#aaa;font-size:16px}
-#lc{width:562px;height:300px;background:#222;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,.4)}
+#lc{width:''' + str(preview_w) + '''px;height:''' + str(preview_h) + '''px;background:#222;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,.4)}
 .ctl{margin-top:20px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;justify-content:center}
 button{padding:8px 20px;border:1px solid #555;border-radius:6px;background:#2a2a4a;color:#eee;cursor:pointer;font-size:14px}
 button:hover{background:#3a3a6a}
@@ -1598,9 +1610,9 @@ def stage_preview(output, output_dir):
             print(f"  ⚠️ 下载 {filename} 失败: {e}")
     
     with open(preview_fetch, 'w', encoding='utf-8') as f:
-        f.write(_build_preview_html('fetch'))
+        f.write(_build_preview_html('fetch', output))
     with open(preview_embedded, 'w', encoding='utf-8') as f:
-        f.write(_build_preview_html('embedded', json_str))
+        f.write(_build_preview_html('embedded', output, json_str))
     
     return preview_fetch, preview_embedded
 
