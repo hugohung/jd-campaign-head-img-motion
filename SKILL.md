@@ -1,7 +1,7 @@
 ---
 name: jd-campaign-head-img-motion
-description: 京东会场头图 Lottie 动效延展，将两个静帧 Lottie JSON 合并为带切帧动效的 Lottie JSON，分阶段流水线架构，自动分组+弹性动效+预览模板。
-version: "9.7.1"
+description: 京东会场头图 Lottie 动效延展，将 2-4 个静帧 Lottie JSON 合并为带切帧动效的循环 Lottie JSON，支持 Figma 插件导出的 [Clip Mask + Content] 画布包装，分阶段流水线架构，自动分组+弹性动效+预览模板。
+version: "9.7.2"
 author: honghaoxiang
 agent_created: true
 trigger:
@@ -17,28 +17,29 @@ trigger:
 
 ## 一句话说明
 
-把两张相同背景、不同前景的 Lottie 静帧图，合成一个循环播放的切换动效。
+把 2-4 张相同尺寸、不同前景的 Lottie 静帧图，合成一个循环播放的切换动效；支持 Figma 插件静态页导出的顶层 `[Clip Mask + Content]` 包装结构。
 
 ## 快速执行
 
 ```bash
-# 基本用法（无展示阶段动效）
-python scripts/generate_merged_lottie_pipeline.py <场景A.json> <场景B.json> [输出目录]
+# 基本用法（无展示阶段动效，支持 2-4 个 JSON）
+python scripts/generate_merged_lottie_pipeline.py <场景A.json> <场景B.json> [场景C.json] [场景D.json] [输出目录]
 
 # 指定装饰元素（持续环形晃动+旋转）
-python scripts/generate_merged_lottie_pipeline.py a.json b.json output/ --deco A_8,A_9
+python scripts/generate_merged_lottie_pipeline.py a.json b.json c.json output/ --deco A_8,A_9,C_5
 
 # 指定装饰+突出元素（缩放两下）
-python scripts/generate_merged_lottie_pipeline.py a.json b.json output/ --deco A_8,A_9,B_5,B_8 --highlight A_5:scale,B_4:scale
+python scripts/generate_merged_lottie_pipeline.py a.json b.json c.json output/ --deco A_8,A_9,B_5,C_8 --highlight A_5:scale,C_4:scale
 ```
 
 **必须遵守的规则：**
 1. **Python 路径**：用 `C:\Users\honghaoxiang\.workbuddy\binaries\python\versions\3.13.12\python.exe`
 2. **输出目录**：默认 `./output`
 3. **运行后**：脚本自动下载 `lottie.min.js` + `FileSaver.min.js` 到输出目录，生成预览+自检
-4. **fps 不一致**：取 `max(A.fps, B.fps)`，时长按秒定义自适应换算（详见时长区间）
-5. **`--deco`**：装饰元素 `A_8,A_9,B_5,B_8`（画面+图层原始索引）
-6. **`--highlight`**：突出元素 `A_5:scale,B_4:scale`
+4. **fps 不一致**：取所有输入的最大 fps，时长按秒定义自适应换算（详见时长区间）
+5. **Figma 导出结构**：Stage 0 自动识别顶层 `[Clip Mask + Content]`，把 `Content` comp 展开为真实图层，并以该包装的尺寸作为画布尺寸
+6. **`--deco`**：装饰元素 `A_8,A_9,B_5,C_8,D_3`（画面+图层原始索引，A-D 最多四屏）
+7. **`--highlight`**：突出元素 `A_5:scale,C_4:scale`
 7. **⚠️ 展示预览用 `preview_embedded.html`**：fetch 版在 `file://` 下会 Failed to fetch，给用户看只给 embedded 版
 
 ## 分阶段流水线架构（核心）
@@ -47,9 +48,9 @@ python scripts/generate_merged_lottie_pipeline.py a.json b.json output/ --deco A
 
 | Stage | 功能 | 中间产物 | 自检内容 |
 |-------|------|---------|---------|
-| 0 Parse | 读 JSON · 规范化变换属性 · asset 去重 | `pipeline/00_parse.json` | 层数 · refId · 编码 |
+| 0 Parse | 读 2-4 个 JSON · Figma 根包装展开 · 规范化变换属性 · asset 去重 | `pipeline/00_parse.json` | 场景数 · 层数 · refId · 编码 |
 | 1 Classify | 静态识别 · **L1分组** · 方向分配 | `pipeline/01_classify.json` | 静态配对无重复 · 每层有dir |
-| 2 Timeline | 两段式交叉切换 · 错峰 · 时长区间 | `pipeline/02_timeline.json` | 时间戳递增 · 不超F_TOTAL |
+| 2 Timeline | 2-4 段循环切换 · 错峰 · 时长区间 | `pipeline/02_timeline.json` | 时间戳递增 · 不超F_TOTAL |
 | 3 Keyframes | 蓄力+overshoot+bounce · 位移+旋转+opacity策略 | `pipeline/03_keyframes.json` | kf递增 · 维度 · opacity策略 |
 | 4 Hold Anim | **展示阶段动效**：装饰元素持续晃动 + 突出元素脉冲 | `pipeline/04_hold_anim.json` | 晃动关键帧插入 · 脉冲关键帧 |
 | 5 Assemble | 图层排序 · ind编号 · 循环锚点 · refId验证 | `merged_output.json` | refId · 循环锚点 |
@@ -69,7 +70,7 @@ python generate_merged_lottie_pipeline.py --from 5 output_dir
 
 ## 动效设计（参考头图动效风格分析报告）
 
-### 时间轴：两段式交叉切换 + 首尾空帧循环
+### 时间轴：2-4 段循环切换 + 首尾空帧循环
 
 ```
 t=0 (空帧)        所有元素在屏幕外
@@ -96,12 +97,22 @@ t=150 (空帧)      所有元素回到屏幕外 → 无缝循环
 - **退场也有蓄力**：先往画面内退一点 + 反向旋转，再弹射飞出
 - **蓄力时长 0.08s**：按 fps 换算（100fps=8f, 30fps=2.4f），确保任何帧率下都可见
 
-### opacity 策略（V9 教训）
+### opacity 策略（V9.7.2 文案中心点触发规则）
 
-| 组 | opacity | 原因 |
+默认只有文案层使用 opacity 动画；花、人物、商品、蝴蝶、背景、装饰等非文案层不做透明度变化，保持源文件 opacity 常量。
+
+| 阶段 | opacity 编排 | 目的 |
 |----|---------|------|
-| A组 | **恒定 100**（`{"a":0,"k":100}`） | 避免渲染器对 opacity=0 首帧的兼容性问题，纯靠位置控制空帧 |
-| B组 | 动画（快速淡入 2-3f） | 确保交叉切换时不穿帮 |
+| 文案在画外 | 保持 0% | 避免飞入前提前显现 |
+| 文案中心点到达画布边缘线或指定点位 | 从 0% 开始淡入 | 对贴边图层更宽容，避免“完整入画后只剩一两帧淡入” |
+| 文案到达固定点 | 到达 100%（或源文件原始 opacity） | 稳定展示时必须清晰完整 |
+| 文案从固定点出场 | 开始渐隐 | 出场运动与透明度同步 |
+| 文案中心点到达画布边缘线或指定点位 | 到达 0% | 文案离场到边缘前完成隐去 |
+
+- opacity 本身必须设置缓动曲线，默认使用标准 ease-in-out（`EASE_STD_O/I`），不使用弹性曲线。
+- “指定点位”用于后续 L2 调参，未指定时使用入/出场方向对应的画布边缘线：左进/左出用 `x=0`，右进/右出用 `x=W`，上方用 `y=0`，下方/居中用 `y=H`。
+- Stage 3 自检要求：文案运动层 opacity 为动画（`a=1`）并以 0% 开始、0% 结束；非文案运动层 opacity 必须保持静态（`a=0`）。
+- 静态常驻层仍保留源文件 opacity，不强制加透明度动画。
 
 ### 缓动曲线
 
@@ -215,11 +226,11 @@ V9.6 优先扫描 **文字图层（ty=5）的实际文本内容**，而非图层
 自动识别不满足需求时，可通过命令行参数手动指定：
 
 ```bash
-# 装饰元素：格式 A_ind,B_ind（A=画面A, B=画面B, ind=图层原始索引）
---deco A_8,A_9,B_5,B_8
+# 装饰元素：格式 A_ind,B_ind,C_ind,D_ind（A-D=画面序号，ind=图层原始索引）
+--deco A_8,A_9,B_5,C_8,D_3
 
 # 突出元素：格式 A_ind:scale,B_ind:scale
---highlight A_5:scale,B_4:scale
+--highlight A_5:scale,C_4:scale
 ```
 
 ### 智能识别规则（V9.6 更新）
@@ -310,7 +321,8 @@ T_HIGHLIGHT_SCALE   = (1.00, 1.20)  # 缩放幅度
 | position 用 2 元素 | lottie-web 崩溃 | 始终 3 元素 `[x,y,z=0]` |
 | IIFE 包裹 JS 函数 | onclick 访问不到 | 全局声明 |
 | 硬编码版本号/帧率/尺寸 | 不同源文件不同 | 从源文件读取 |
-| A组 opacity 设 0 首帧 | 渲染器兼容性问题 | A组恒定 100，位置控制空帧 |
+| 非文案层使用透明度变化 | 花、人物、商品等会显得闪烁，削弱主体运动 | 只有文案层使用 opacity 动画，非文案层保持源 opacity 静态 |
+| opacity 触发点设为完整入画 | 贴边图层淡入区间过短，看起来像瞬间全显 | 用文案中心点到达画布边缘线或指定点位作为淡入/淡出触发 |
 | 手写预览 HTML | 丢 FileSaver 逻辑 | 必须从 `build_preview_html()` 生成 |
 
 ## 自定义配置
@@ -319,9 +331,7 @@ T_HIGHLIGHT_SCALE   = (1.00, 1.20)  # 缩放幅度
 
 ```python
 p = {
-    'T_TOTAL': 5.0,        # 总时长（秒）
-    'T_A_IN_START': 0.0,   # A组入场开始（秒）
-    'T_CROSS': 2.4,        # 交叉切换中心点（秒）
+    'T_TOTAL': 2.5 * scene_count,  # 默认每个画面约 2.5s，2/3/4 图分别为 5/7.5/10s
     'T_CROSS_WIN': 0.20,   # 交叉窗口时长（秒，按 fps 换算）
 }
 ```
@@ -365,7 +375,7 @@ jd-lottie-anim-extension/
 
 ## 版本历史
 
-详见 `CHANGELOG.md`。当前版本 V9.7.0。
+详见 `CHANGELOG.md`。当前版本 V9.7.2。
 
 ## 排错速查
 
@@ -375,7 +385,7 @@ jd-lottie-anim-extension/
 |------|-----------|---------|
 | 预览白屏 | CDN 加载失败 | 检查网络；双CDN兜底；或用 embedded 版离线打开 |
 | 按钮无效 | JS 函数在 IIFE 内 | 确认所有函数全局声明（脚本已固化处理） |
-| A组元素不可见 | opacity 设了 0 首帧 | A组必须恒定 100，位置控制空帧（脚本已固化处理） |
+| 淡入淡出不明显 | opacity 在画外已经变化完毕，或贴边图层触发点太靠后 | 用 V9.7.2 中心点触发规则：文案中心点到达画布边缘线或指定点位后开始淡入/结束渐隐 |
 | 满宽素材边缘被裁切 | 源文件 WebP 被误标 PNG | V9.5+ Stage 0 自动检测并修复 |
 | 其他问题 | — | [排查清单](references/LOTTIE_BUG_CHECKLIST.md) |
 

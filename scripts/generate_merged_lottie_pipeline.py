@@ -1,5 +1,5 @@
 """
-Lottie 静帧合并动效 — 分阶段流水线版（V9.7.1）
+Lottie 静帧合并动效 — 分阶段流水线版（V9.7.2）
 
 架构：6 阶段解耦流水线，每阶段独立函数 + 中间产物 + 自检 + 局部重跑
   Stage 0 Parse     — 读 JSON · 规范化变换属性 · asset 去重
@@ -11,7 +11,7 @@ Lottie 静帧合并动效 — 分阶段流水线版（V9.7.1）
 
 用法:
   # 全跑
-  python generate_merged_lottie_pipeline.py a.json b.json output/
+  python generate_merged_lottie_pipeline.py a.json b.json [c.json d.json] output/
   # 从 Stage 2 重跑到末尾（复用 0/1 的中间产物）
   python generate_merged_lottie_pipeline.py a.json b.json output/ --from 2
   # 只重跑 Stage 3 到 Stage 5
@@ -22,6 +22,16 @@ Lottie 静帧合并动效 — 分阶段流水线版（V9.7.1）
 
 import json, copy, sys, os, argparse, random
 from copy import deepcopy
+
+SCENE_TAGS = ('a', 'b', 'c', 'd')
+
+def _tag_label(tag):
+    return tag.upper()
+
+def _scene_tag(index):
+    if index >= len(SCENE_TAGS):
+        raise ValueError('最多支持 4 个输入 JSON')
+    return SCENE_TAGS[index]
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 工具函数（所有阶段共用）
@@ -114,13 +124,14 @@ def _extract_text_content(layer):
     pos = _get_pos(layer.get('ks', {}).get('p', {}))
     if not text or not isinstance(text, str) or not text.strip():
         return None
-    return {'pos': pos, 'text': text.strip()}
+    return {'pos': pos, 'text': text.strip(), 'ind': layer.get('ind', 0), 'nm': layer.get('nm', '')}
 
 def _extract_layer(layer, id_map):
     """从源图层提取规范化元数据"""
     ks = layer.get('ks', {})
     old_ref = layer.get('refId', '')
     new_ref = id_map.get(old_ref, old_ref) if old_ref else ''
+    text_info = _extract_text_content(layer)
     return {
         'ind':    layer.get('ind', 0),
         'ty':     layer.get('ty', 2),
@@ -139,7 +150,103 @@ def _extract_layer(layer, id_map):
         'cl':     layer.get('cl'),
         'tt':     layer.get('tt'),
         'td':     layer.get('td'),
+        't':      copy.deepcopy(layer.get('t')),
+        'ef':     copy.deepcopy(layer.get('ef')),
+        'masksProperties': copy.deepcopy(layer.get('masksProperties')),
+        'hd':     layer.get('hd'),
+        'text':   text_info['text'] if text_info else None,
     }
+
+def _compose_child_with_wrapper(layer, wrapper_layer):
+    """把 Figma 根 Content 包装层的静态变换合成到子层上。"""
+    child = deepcopy(layer)
+    wks = wrapper_layer.get('ks', {})
+    cks = child.setdefault('ks', {})
+
+    wp = _get_pos(wks.get('p', {}))
+    wa = _get_pos(wks.get('a', {}))
+    ws = _get_scale(wks.get('s', {}))
+    wr = _get_scalar(wks.get('r', {}), 0)
+    wo = _get_scalar(wks.get('o', {}), 100)
+
+    cp = _get_pos(cks.get('p', {}))
+    ca = _get_pos(cks.get('a', {}))
+    cs = _get_scale(cks.get('s', {}))
+    cr = _get_scalar(cks.get('r', {}), 0)
+    co = _get_scalar(cks.get('o', {}), 100)
+
+    sx, sy, sz = ws[0] / 100.0, ws[1] / 100.0, ws[2] / 100.0
+    cks['p'] = {'a': 0, 'k': [
+        wp[0] + (cp[0] - wa[0]) * sx,
+        wp[1] + (cp[1] - wa[1]) * sy,
+        wp[2] + (cp[2] - wa[2]) * sz,
+    ]}
+    cks['a'] = {'a': 0, 'k': ca}
+    cks['s'] = {'a': 0, 'k': [cs[0] * sx, cs[1] * sy, cs[2] * sz]}
+    cks['r'] = {'a': 0, 'k': cr + wr}
+    cks['o'] = {'a': 0, 'k': co * wo / 100.0}
+    child['ks'] = cks
+    return child
+
+def _select_source_layers(src):
+    """识别 Figma 插件导出的根 [Clip Mask + Content]，返回真实内容层。"""
+    layers = src.get('layers', [])
+    assets = {a.get('id'): a for a in src.get('assets', [])}
+    info = {
+        'figma_unwrapped': False,
+        'canvas_w': src.get('w', 1125),
+        'canvas_h': src.get('h', 600),
+        'root_layer_count': len(layers),
+        'content_layer_count': len(layers),
+        'root_ref': None,
+    }
+    if len(layers) >= 2:
+        clip, content = layers[0], layers[1]
+        clip_name = (clip.get('nm') or '').strip().lower()
+        content_name = (content.get('nm') or '').strip().lower()
+        comp = assets.get(content.get('refId'))
+        is_figma_root = (
+            clip_name == 'clip mask'
+            and content_name == 'content'
+            and content.get('ty') == 0
+            and comp
+            and isinstance(comp.get('layers'), list)
+        )
+        if is_figma_root:
+            content_layers = [_compose_child_with_wrapper(l, content) for l in comp.get('layers', [])]
+            info.update({
+                'figma_unwrapped': True,
+                'canvas_w': content.get('w') or comp.get('w') or src.get('w', 1125),
+                'canvas_h': content.get('h') or comp.get('h') or src.get('h', 600),
+                'content_layer_count': len(content_layers),
+                'root_ref': content.get('refId'),
+            })
+            return content_layers, info
+    return layers, info
+
+def _merge_fonts(srcs):
+    merged = {}
+    for src in srcs:
+        fonts = src.get('fonts')
+        if not isinstance(fonts, dict):
+            continue
+        for font in fonts.get('list', []) or []:
+            key = font.get('fName') or font.get('fFamily') or json.dumps(font, sort_keys=True, ensure_ascii=False)
+            if key not in merged:
+                merged[key] = deepcopy(font)
+    return {'list': list(merged.values())} if merged else None
+
+def _merge_chars(srcs):
+    merged = {}
+    for src in srcs:
+        for ch in src.get('chars', []) or []:
+            key = json.dumps({
+                'ch': ch.get('ch'), 'style': ch.get('style'),
+                'fFamily': ch.get('fFamily'), 'data': ch.get('data')
+            }, sort_keys=True, ensure_ascii=False)
+            if key not in merged:
+                merged[key] = deepcopy(ch)
+    return list(merged.values()) if merged else None
 
 def _fix_asset_images(assets_list):
     """修复 WebP 图片被误标为 PNG 的问题：检测真实格式，纠正 MIME 类型，
@@ -188,40 +295,68 @@ def _get_asset_dims(assets_list, ref_id):
             return a.get('w', 100), a.get('h', 100)
     return 100, 100
 
-def stage_parse(file_a, file_b):
-    """Stage 0: 读取两个源 JSON，规范化图层，asset 去重"""
-    with open(file_a, encoding='utf-8') as f: src_a = json.load(f)
-    with open(file_b, encoding='utf-8') as f: src_b = json.load(f)
+def stage_parse(input_files):
+    """Stage 0: 读取 2-4 个源 JSON，规范化图层，识别 Figma 根包装，asset 去重"""
+    if not isinstance(input_files, (list, tuple)):
+        input_files = [input_files]
+    input_files = [p for p in input_files if p]
+    if not (2 <= len(input_files) <= 4):
+        _fail(0, f'全跑模式需要 2-4 个 JSON，当前={len(input_files)}')
 
-    # 修复 WebP 被误标为 PNG / 尺寸不一致的问题（V9.5）
-    _fix_asset_images(src_a.get('assets', []))
-    _fix_asset_images(src_b.get('assets', []))
+    srcs = []
+    source_infos = []
+    for path in input_files:
+        with open(path, encoding='utf-8') as f:
+            src = json.load(f)
+        _fix_asset_images(src.get('assets', []))
+        source_layers, source_info = _select_source_layers(src)
+        source_info['file'] = path
+        srcs.append(src)
+        source_infos.append((source_layers, source_info))
 
-    FPS = max(src_a.get('fr', 30), src_b.get('fr', 30))
-    W   = src_a.get('w', 1125)
-    H   = src_a.get('h', 600)
-    V   = src_a.get('v', '5.7.5')
+    FPS = max(src.get('fr', 30) for src in srcs)
+    W = source_infos[0][1].get('canvas_w') or srcs[0].get('w', 1125)
+    H = source_infos[0][1].get('canvas_h') or srcs[0].get('h', 600)
+    V = srcs[0].get('v', '5.7.5')
 
-    # asset 前缀隔离
-    assets_a, id_map_a = _prefix_asset_ids(src_a.get('assets', []), 'a_')
-    assets_b, id_map_b = _prefix_asset_ids(src_b.get('assets', []), 'b_')
-    all_assets = assets_a + assets_b
+    fonts = _merge_fonts(srcs)
+    chars = _merge_chars(srcs)
 
-    # 提取图层
-    layers_a = [_extract_layer(l, id_map_a) for l in src_a.get('layers', [])]
-    layers_b = [_extract_layer(l, id_map_b) for l in src_b.get('layers', [])]
+    all_assets = []
+    scenes = []
+    canvas_warnings = []
+    for idx, (src, (source_layers, source_info)) in enumerate(zip(srcs, source_infos)):
+        tag = _scene_tag(idx)
+        prefix = f'{tag}_'
+        cw = source_info.get('canvas_w') or src.get('w', W)
+        ch = source_info.get('canvas_h') or src.get('h', H)
+        if abs(cw - W) > 0.1 or abs(ch - H) > 0.1:
+            canvas_warnings.append({
+                'tag': tag, 'file': source_info['file'],
+                'w': cw, 'h': ch, 'expected_w': W, 'expected_h': H,
+            })
 
-    # 提取文字图层（ty=5）的文本内容（V9.6: 用于关键词自动识别装饰/突出元素）
-    text_layers_a = [t for t in (_extract_text_content(l) for l in src_a.get('layers', [])) if t]
-    text_layers_b = [t for t in (_extract_text_content(l) for l in src_b.get('layers', [])) if t]
+        assets, id_map = _prefix_asset_ids(src.get('assets', []), prefix)
+        layers = [_extract_layer(l, id_map) for l in source_layers]
+        text_layers = [t for t in (_extract_text_content(l) for l in source_layers) if t]
 
-    # 签名 + 尺寸
-    for l in layers_a:
-        l['_sig'] = _get_asset_sig(assets_a, l['refId'])
-        l['aw'], l['ah'] = _get_asset_dims(assets_a, l['refId'])
-    for l in layers_b:
-        l['_sig'] = _get_asset_sig(assets_b, l['refId'])
-        l['aw'], l['ah'] = _get_asset_dims(assets_b, l['refId'])
+        for t in text_layers:
+            t['tag'] = tag
+        for l in layers:
+            l['_sig'] = _get_asset_sig(assets, l.get('refId', ''))
+            l['aw'], l['ah'] = _get_asset_dims(assets, l.get('refId', ''))
+
+        all_assets.extend(assets)
+        scenes.append({
+            'tag': tag,
+            'label': _tag_label(tag),
+            'file': source_info['file'],
+            'name': src.get('nm') or f'Scene {idx + 1}',
+            'layers': layers,
+            'text_layers': text_layers,
+            'figma_unwrapped': source_info.get('figma_unwrapped', False),
+            'source_info': source_info,
+        })
 
     # 图片 asset 去重
     _img_sig = {}
@@ -238,10 +373,11 @@ def stage_parse(file_a, file_b):
             _img_sig[sig] = a['id']
             _deduped.append(a)
     if _asset_id_remap:
-        for l in layers_a + layers_b:
-            rid = l.get('refId', '')
-            if rid in _asset_id_remap:
-                l['refId'] = _asset_id_remap[rid]
+        for scene in scenes:
+            for l in scene['layers']:
+                rid = l.get('refId', '')
+                if rid in _asset_id_remap:
+                    l['refId'] = _asset_id_remap[rid]
         for a in _deduped:
             if 'layers' in a:
                 for sub in a['layers']:
@@ -250,30 +386,45 @@ def stage_parse(file_a, file_b):
                         sub['refId'] = _asset_id_remap[rid]
         all_assets = _deduped
 
-    return {
-        'meta': {'v': V, 'fr': FPS, 'w': W, 'h': H},
+    meta = {'v': V, 'fr': FPS, 'w': W, 'h': H}
+    if fonts:
+        meta['fonts'] = fonts
+    if chars:
+        meta['chars'] = chars
+
+    out = {
+        'meta': meta,
         'assets': all_assets,
-        'layers_a': layers_a,
-        'layers_b': layers_b,
-        'text_layers_a': text_layers_a,
-        'text_layers_b': text_layers_b,
+        'scenes': scenes,
         'dedup_count': len(_asset_id_remap),
+        'canvas_warnings': canvas_warnings,
+        # 兼容旧中间产物字段，便于人工查看前两屏
+        'layers_a': scenes[0]['layers'],
+        'layers_b': scenes[1]['layers'],
+        'text_layers_a': scenes[0]['text_layers'],
+        'text_layers_b': scenes[1]['text_layers'],
     }
+    return out
 
 def stage_parse_check(d):
     """Stage 0 自检"""
     m = d['meta']
     assert m['fr'] > 0, 'fr 必须 > 0'
     assert m['w'] > 0 and m['h'] > 0, 'w/h 必须 > 0'
-    assert d['layers_a'], 'layers_a 为空'
-    assert d['layers_b'], 'layers_b 为空'
+    scenes = d.get('scenes', [])
+    assert 2 <= len(scenes) <= 4, '场景数必须为 2-4'
+    for scene in scenes:
+        assert scene['layers'], f'{scene["label"]} 图层为空'
     # refId 完整性
     asset_ids = {a['id'] for a in d['assets']}
-    for label, layers in [('A', d['layers_a']), ('B', d['layers_b'])]:
-        for l in layers:
+    for scene in scenes:
+        for l in scene['layers']:
             if l.get('refId') and l['refId'] not in asset_ids:
-                _fail(0, f'{label} 图层 {l.get("nm")} refId={l["refId"]} 不在 assets 中')
-    _ok(0, f'解析完成 A={len(d["layers_a"])}层 B={len(d["layers_b"])}层 assets={len(d["assets"])} 去重={d["dedup_count"]}')
+                _fail(0, f'{scene["label"]} 图层 {l.get("nm")} refId={l["refId"]} 不在 assets 中')
+    figma_count = sum(1 for s in scenes if s.get('figma_unwrapped'))
+    counts = ' '.join(f'{s["label"]}={len(s["layers"])}层' for s in scenes)
+    warn = f' 尺寸警告={len(d.get("canvas_warnings", []))}' if d.get('canvas_warnings') else ''
+    _ok(0, f'解析完成 {len(scenes)}画面 {counts} assets={len(d["assets"])} 去重={d["dedup_count"]} Figma展开={figma_count}{warn}')
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -304,6 +455,9 @@ def _is_static_pair(la, lb):
     # 形状层：变换一致即静态
     if la['ty'] == 4 and lb['ty'] == 4:
         return True
+    # 文本层：文本内容 + 变换一致即静态
+    if la['ty'] == 5 and lb['ty'] == 5:
+        return (la.get('text') or '') == (lb.get('text') or '')
     return False
 
 def _get_direction(pos, W, H):
@@ -507,77 +661,120 @@ def _auto_detect_deco_highlight(text_layers, fg_layers, tag, W):
     
     return auto_deco, auto_highlight
 
+def _find_static_groups(scenes):
+    """找出所有场景都存在且变换一致的静态层。"""
+    base_layers = scenes[0]['layers']
+    matched = [set() for _ in scenes]
+    static_groups = []
+
+    for base_idx, base in enumerate(base_layers):
+        group_layers = {scenes[0]['tag']: base}
+        group_indices = {0: base_idx}
+        ok = True
+        for si in range(1, len(scenes)):
+            best_idx = None
+            for li, layer in enumerate(scenes[si]['layers']):
+                if li in matched[si]:
+                    continue
+                if _pos_near(base['pos'], layer['pos']) and _is_static_pair(base, layer):
+                    best_idx = li
+                    break
+            if best_idx is None:
+                ok = False
+                break
+            group_layers[scenes[si]['tag']] = scenes[si]['layers'][best_idx]
+            group_indices[si] = best_idx
+        if ok:
+            matched[0].add(base_idx)
+            for si, li in group_indices.items():
+                matched[si].add(li)
+            static_groups.append({'base': base, 'layers': group_layers})
+
+    fg_by_tag = {}
+    for si, scene in enumerate(scenes):
+        fg_by_tag[scene['tag']] = [
+            layer for li, layer in enumerate(scene['layers'])
+            if li not in matched[si]
+        ]
+    return static_groups, fg_by_tag
+
 def stage_classify(parse_out, output_dir=None):
-    """Stage 1: 静态识别 + 前景分组 + 方向（带 L1 分组 + L2 覆盖）"""
+    """Stage 1: 多场景静态识别 + 前景分组 + 方向（带 L1 分组 + L2 覆盖）"""
     W = parse_out['meta']['w']
     H = parse_out['meta']['h']
-    layers_a = parse_out['layers_a']
-    layers_b = parse_out['layers_b']
+    scenes_in = parse_out.get('scenes', [])
 
-    static_pairs = []
-    matched_b = set()
-    fg_a = []
-    for la in layers_a:
-        matched = False
-        for i, lb in enumerate(layers_b):
-            if i in matched_b: continue
-            if _pos_near(la['pos'], lb['pos']) and _is_static_pair(la, lb):
-                static_pairs.append({'a': la, 'b': lb})
-                matched_b.add(i)
-                matched = True
-                break
-        if not matched:
-            fg_a.append(la)
-    fg_b = [lb for i, lb in enumerate(layers_b) if i not in matched_b]
+    static_groups, fg_by_tag = _find_static_groups(scenes_in)
 
-    # L1: 纯代码自动分组（直接在图层上设 group_id + dir）
-    a_group_dirs, a_group_members = _auto_group(fg_a, W, H)
-    b_group_dirs, b_group_members = _auto_group(fg_b, W, H)
+    scene_out = []
+    for scene in scenes_in:
+        tag = scene['tag']
+        fg_layers = fg_by_tag.get(tag, [])
+        group_dirs, group_members = _auto_group(fg_layers, W, H)
+        scene_out.append({
+            'tag': tag,
+            'label': scene['label'],
+            'name': scene.get('name', tag),
+            'fg': fg_layers,
+            'text_layers': scene.get('text_layers', []),
+            'groups': group_members,
+            'group_dirs': group_dirs,
+            'figma_unwrapped': scene.get('figma_unwrapped', False),
+        })
 
-    # L2: 人工微调覆盖（如果 group_config.json 存在）
     overrides = _load_group_config(output_dir) if output_dir else None
     has_overrides = False
     if overrides:
         has_overrides = True
-        # overrides 按 nm 匹配，覆盖 L1 的分组和方向
         for ov in overrides:
             ov_dir = ov.get('dir')
             ov_nms = set(ov.get('layers', []))
-            for l in fg_a + fg_b:
-                if l.get('nm', '') in ov_nms:
-                    l['dir'] = ov_dir or l['dir']
-                    l['group_id'] = 'override'
+            for scene in scene_out:
+                for l in scene['fg']:
+                    if l.get('nm', '') in ov_nms:
+                        l['dir'] = ov_dir or l['dir']
+                        l['group_id'] = 'override'
 
-    # 兜底：确保每个前景元素都有 dir（_auto_group 已设，这里防漏）
-    for l in fg_a + fg_b:
-        if 'dir' not in l:
-            l['dir'] = _get_direction(l['pos'], W, H)
-        if 'group_id' not in l:
-            l['group_id'] = None
+    for scene in scene_out:
+        for l in scene['fg']:
+            if 'dir' not in l:
+                l['dir'] = _get_direction(l['pos'], W, H)
+            if 'group_id' not in l:
+                l['group_id'] = None
 
-    # V9.6: 文字图层关键词 → 自动识别装饰/突出元素
-    auto_deco_a, auto_highlight_a = _auto_detect_deco_highlight(
-        parse_out.get('text_layers_a', []), fg_a, 'a', W)
-    auto_deco_b, auto_highlight_b = _auto_detect_deco_highlight(
-        parse_out.get('text_layers_b', []), fg_b, 'b', W)
-    auto_deco = auto_deco_a + auto_deco_b
-    auto_highlight = auto_highlight_a + auto_highlight_b
+    auto_deco = []
+    auto_highlight = []
+    for scene in scene_out:
+        d, h = _auto_detect_deco_highlight(scene.get('text_layers', []), scene['fg'], scene['tag'], W)
+        auto_deco.extend(d)
+        auto_highlight.extend(h)
 
-    # 记录分组信息（用于中间产物 + 自检输出）
+    static_pairs = []
+    if len(scene_out) >= 2:
+        for group in static_groups:
+            a = group['layers'].get('a')
+            b = group['layers'].get('b')
+            if a and b:
+                static_pairs.append({'a': a, 'b': b})
+
+    first = scene_out[0]
+    second = scene_out[1]
     return {
         'meta': parse_out['meta'],
         'assets': parse_out['assets'],
+        'scenes': scene_out,
+        'static_groups': static_groups,
         'static_pairs': static_pairs,
-        'fg_a': fg_a,
-        'fg_b': fg_b,
-        'groups_a': a_group_members,
-        'groups_b': b_group_members,
-        'group_dirs_a': a_group_dirs,
-        'group_dirs_b': b_group_dirs,
+        'fg_a': first['fg'],
+        'fg_b': second['fg'],
+        'groups_a': first['groups'],
+        'groups_b': second['groups'],
+        'group_dirs_a': first['group_dirs'],
+        'group_dirs_b': second['group_dirs'],
         'has_overrides': has_overrides,
-        'auto_deco': auto_deco,
-        'auto_highlight': auto_highlight,
-        'has_text_layers': bool(parse_out.get('text_layers_a') or parse_out.get('text_layers_b')),
+        'auto_deco': list(dict.fromkeys(auto_deco)),
+        'auto_highlight': list(dict.fromkeys(auto_highlight)),
+        'has_text_layers': any(scene.get('text_layers') for scene in scene_out),
     }
 
 def stage_classify_check(d):
@@ -586,15 +783,21 @@ def stage_classify_check(d):
     b_inds = [p['b']['ind'] for p in d['static_pairs']]
     assert len(a_inds) == len(set(a_inds)), 'static_pairs 中 A 侧有重复 ind'
     assert len(b_inds) == len(set(b_inds)), 'static_pairs 中 B 侧有重复 ind'
-    assert d['fg_a'] or d['fg_b'], 'fg_a 和 fg_b 都为空，输入可能有问题'
+    scenes = d.get('scenes', [])
+    assert scenes, '缺少 scenes'
+    assert any(scene['fg'] for scene in scenes), '所有场景前景都为空，输入可能有问题'
     # 检查每个前景元素都有 dir
-    for l in d['fg_a'] + d['fg_b']:
-        assert 'dir' in l, f'图层 {l.get("nm")} 缺少 dir 属性'
+    for scene in scenes:
+        for l in scene['fg']:
+            assert 'dir' in l, f'{scene["label"]} 图层 {l.get("nm")} 缺少 dir 属性'
     # 输出分组摘要
     all_groups = {}
-    for l in d['fg_a'] + d['fg_b']:
-        gid = l.get('group_id', 'none')
-        all_groups.setdefault(gid, []).append(l['nm'])
+    for scene in scenes:
+        for l in scene['fg']:
+            gid = f'{scene["label"]}:{l.get("group_id", "none")}'
+            all_groups.setdefault(gid, []).append(l['nm'])
+    if not all_groups:
+        all_groups['none'] = []
     group_summary = ' | '.join(f'{gid}: {",".join(nms[:3])}{"..." if len(nms)>3 else ""}' for gid, nms in all_groups.items())
     override_tag = ' [含人工覆盖]' if d.get('has_overrides') else ''
     text_tag = ' 检测到文字图层' if d.get('has_text_layers') else ''
@@ -608,8 +811,9 @@ def stage_classify_check(d):
         if auto_highlight:
             parts.append(f'突出={len(auto_highlight)}')
         auto_tag = f' 自动识别({", ".join(parts)})'
-    
-    _ok(1, f'静态={len(d["static_pairs"])}对 A前景={len(d["fg_a"])} B前景={len(d["fg_b"])} 分组={len(all_groups)}组{override_tag}{text_tag}{auto_tag}')
+
+    fg_counts = ' '.join(f'{s["label"]}前景={len(s["fg"])}' for s in scenes)
+    _ok(1, f'静态={len(d.get("static_groups", []))}组 {fg_counts} 分组={len(all_groups)}组{override_tag}{text_tag}{auto_tag}')
     print(f'    分组详情: {group_summary}')
 
 
@@ -651,73 +855,65 @@ T_HIGHLIGHT_PAUSE   = (0.13, 0.20) # 缩放间停顿 0.13-0.20s（快50%）
 T_HIGHLIGHT_SCALE   = (1.00, 1.20) # 缩放幅度：从原始大小放大到 120%
 
 def stage_timeline(classify_out, params=None):
-    """Stage 2: 参考动效风格时间轴
-    结构：两段式交叉切换 + 首尾空帧循环
-    - A组: t=0 从屏幕外入场 → 展示 → 退场到屏幕外
-    - 交叉窗口: A退场 + B入场 同步
-    - B组: t≈T/2 从屏幕外入场 → 展示 → 退场到屏幕外
-    - 首尾空帧: t=0 和 t=F_TOTAL 元素都在屏幕外
-    所有时长以秒定义，按 fps 换算成帧，保证不同 fps 下节奏一致。
+    """Stage 2: 2-4 画面循环时间轴。
+    每个画面默认占 2.5s，画面之间保留 0.20s 交叉窗口；最后一屏退到末帧，
+    下一次循环从 A 屏首帧接上，保持首尾空帧一致。
     """
-    import random
     meta = classify_out['meta']
     fps = meta['fr']
-    H = meta['h']
+    scenes = classify_out.get('scenes', [])
+    scene_count = len(scenes)
+    if not (2 <= scene_count <= 4):
+        _fail(2, f'时间轴只支持 2-4 画面，当前={scene_count}')
 
-    # 默认时间轴参数（秒）
     p = {
-        'T_TOTAL': 5.0,        # 总时长 5s
-        'T_A_IN_START': 0.0,   # A组入场开始（首帧空帧，从屏幕外开始飞入）
-        'T_CROSS': 2.4,        # 交叉切换中心点（A退场+B入场 同窗口）
-        'T_CROSS_WIN': T_CROSS_WIN,  # 交叉窗口时长（秒）
+        'T_TOTAL': 2.5 * scene_count,
+        'T_CROSS_WIN': T_CROSS_WIN,
     }
     if params:
         p.update(params)
 
     F_TOTAL = _s2f(p['T_TOTAL'], fps)
-    F_A_IN_START = _s2f(p['T_A_IN_START'], fps)
-    F_CROSS = _s2f(p['T_CROSS'], fps)
-    CROSS_WIN = _s2f(p['T_CROSS_WIN'], fps)
+    CROSS_WIN = max(2, _s2f(p['T_CROSS_WIN'], fps))
+    half_cross = max(1, CROSS_WIN // 2)
+    segment = F_TOTAL / scene_count
 
-    # 交叉窗口：A退场开始 = B入场开始 = F_CROSS - CROSS_WIN/2
-    half_cross = CROSS_WIN // 2
-    F_A_EXIT_S = F_CROSS - half_cross   # A开始退场（B同时开始入场）
-    F_A_EXIT_E = F_CROSS + half_cross   # A退场结束
-    # B入场窗口 = A退场窗口
-    F_B_IN_S = F_A_EXIT_S
-    F_B_IN_E = F_A_EXIT_E
-    # B退场窗口在末尾，紧贴 F_TOTAL（确保有足够展示时间）
-    F_B_EXIT_S = F_TOTAL - half_cross - _s2f(T_OUT_DUR[0], fps)  # 留退场窗口（与 A 对称）
-    F_B_EXIT_E = F_TOTAL
-
-    static_pairs = classify_out['static_pairs']
-    static_sorted = sorted([pp['a'] for pp in static_pairs], key=lambda l: l['ind'])
+    static_sorted = sorted([g['base'] for g in classify_out.get('static_groups', [])], key=lambda l: l['ind'])
     static_top = [l for l in static_sorted if l['ind'] < 5]
     static_bot = [l for l in static_sorted if l['ind'] >= 5]
 
-    # 秒 → 帧换算（用于每元素时间分配）
-    in_dur_range_f  = (_s2f(T_IN_DUR[0], fps), _s2f(T_IN_DUR[1], fps))
-    out_dur_range_f = (_s2f(T_OUT_DUR[0], fps), _s2f(T_OUT_DUR[1], fps))
-    stagger_range_f = (_s2f(T_STAGGER[0], fps), _s2f(T_STAGGER[1], fps))
-    # 展示最小时长（秒→帧），确保入场后有足够停留
-    min_hold_f = _s2f(T_MIN_HOLD, fps)
+    in_dur_range_f  = (max(1, _s2f(T_IN_DUR[0], fps)), max(2, _s2f(T_IN_DUR[1], fps)))
+    out_dur_range_f = (max(1, _s2f(T_OUT_DUR[0], fps)), max(2, _s2f(T_OUT_DUR[1], fps)))
+    stagger_range_f = (max(1, _s2f(T_STAGGER[0], fps)), max(1, _s2f(T_STAGGER[1], fps)))
+    min_hold_f = max(1, _s2f(T_MIN_HOLD, fps))
+
+    transition_windows = []
+    for i in range(scene_count - 1):
+        center = round((i + 1) * segment)
+        exit_s = max(1, center - half_cross)
+        exit_e = min(F_TOTAL, center + half_cross)
+        transition_windows.append((exit_s, exit_e))
+
+    last_exit_s = max(1, F_TOTAL - half_cross - out_dur_range_f[0])
+    last_exit_e = F_TOTAL
 
     def assign_timeline(base_start, exit_s, exit_e, layers, tag):
-        """为每个元素分配独立时间轴，确保 in_end <= hold_end"""
         timeline = []
         cursor = base_start
-        for i, l in enumerate(sorted(layers, key=lambda l: l['ind'])):
-            # 入场时长：不能超过 exit_s - cursor - min_hold（至少留 min_hold 展示）
-            max_in = max(in_dur_range_f[0], exit_s - cursor - min_hold_f)
-            in_dur = min(random.randint(*in_dur_range_f), max_in)
-            in_start = cursor
-            in_end = in_start + in_dur
-            hold_end = exit_s
-            # 退场时长：不能超过 F_TOTAL - hold_end
-            max_out = max(out_dur_range_f[0], F_TOTAL - hold_end)
-            out_dur = min(random.randint(*out_dur_range_f), max_out)
+        latest_start = max(base_start, exit_s - min_hold_f - in_dur_range_f[0])
+        for l in sorted(layers, key=lambda x: x['ind']):
+            in_start = min(cursor, latest_start)
+            room_for_in = max(1, exit_s - in_start - min_hold_f)
+            in_dur = min(random.randint(*in_dur_range_f), room_for_in)
+            in_end = min(in_start + max(1, in_dur), max(in_start + 1, exit_s))
+            hold_end = max(exit_s, in_end)
+
+            out_limit = max(hold_end + 1, exit_e)
+            out_limit = min(out_limit, F_TOTAL)
+            out_room = max(1, out_limit - hold_end)
+            out_dur = min(random.randint(*out_dur_range_f), out_room)
             out_start = hold_end
-            out_end = min(out_start + out_dur, F_TOTAL)
+            out_end = min(out_start + max(1, out_dur), F_TOTAL)
 
             timeline.append({
                 'layer': l,
@@ -726,54 +922,91 @@ def stage_timeline(classify_out, params=None):
                 'hold_end': hold_end,
                 'out_start': out_start,
                 'out_end': out_end,
-                'initially_visible': (tag == 'a'),  # A组首帧位置在屏幕外但opacity=100
-                'stagger': 0,  # 错峰已通过 cursor 递增实现
+                'initially_visible': (tag == 'a'),
+                'stagger': 0,
             })
-            # 下一个元素错峰
             cursor = in_start + random.randint(*stagger_range_f)
         return timeline
 
-    a_timeline = assign_timeline(F_A_IN_START, F_A_EXIT_S, F_A_EXIT_E, classify_out['fg_a'], 'a')
-    b_timeline = assign_timeline(F_B_IN_S, F_B_EXIT_S, F_B_EXIT_E, classify_out['fg_b'], 'b')
+    scene_timelines = []
+    scene_windows = []
+    for i, scene in enumerate(scenes):
+        if i == 0:
+            base_start = 0
+        else:
+            base_start = transition_windows[i - 1][0]
+
+        if i < scene_count - 1:
+            exit_s, exit_e = transition_windows[i]
+        else:
+            exit_s, exit_e = last_exit_s, last_exit_e
+
+        scene_windows.append({
+            'tag': scene['tag'],
+            'label': scene['label'],
+            'in_start': base_start,
+            'exit_start': exit_s,
+            'exit_end': exit_e,
+        })
+        scene_timelines.append({
+            'tag': scene['tag'],
+            'label': scene['label'],
+            'name': scene.get('name', scene['label']),
+            'timeline': assign_timeline(base_start, exit_s, exit_e, scene['fg'], scene['tag']),
+        })
+
+    tp = {
+        'F_TOTAL': F_TOTAL,
+        'CROSS_WIN': CROSS_WIN,
+        'scene_count': scene_count,
+        'scene_order': [s['tag'] for s in scenes],
+        'scene_windows': scene_windows,
+    }
+    if scene_count >= 2:
+        tp.update({
+            'F_A_EXIT_S': scene_windows[0]['exit_start'],
+            'F_A_EXIT_E': scene_windows[0]['exit_end'],
+            'F_B_IN_S': scene_windows[1]['in_start'],
+            'F_B_IN_E': scene_windows[1]['in_start'] + CROSS_WIN,
+            'F_B_EXIT_S': scene_windows[1]['exit_start'],
+            'F_B_EXIT_E': scene_windows[1]['exit_end'],
+        })
 
     return {
         'meta': meta,
         'assets': classify_out['assets'],
-        'timeline_params': {
-            'F_TOTAL': F_TOTAL, 'F_A_EXIT_S': F_A_EXIT_S, 'F_A_EXIT_E': F_A_EXIT_E,
-            'F_B_IN_S': F_B_IN_S, 'F_B_IN_E': F_B_IN_E,
-            'F_B_EXIT_S': F_B_EXIT_S, 'F_B_EXIT_E': F_B_EXIT_E,
-            'CROSS_WIN': CROSS_WIN,
-        },
+        'timeline_params': tp,
         'static_top': static_top,
         'static_bot': static_bot,
-        'b_timeline': b_timeline,
-        'a_timeline': a_timeline,
+        'scene_timelines': scene_timelines,
+        'a_timeline': scene_timelines[0]['timeline'],
+        'b_timeline': scene_timelines[1]['timeline'],
     }
 
 def stage_timeline_check(d):
-    """Stage 2 自检（参考动效风格时间轴）"""
+    """Stage 2 自检（多画面循环时间轴）"""
     tp = d['timeline_params']
     F = tp['F_TOTAL']
-    # 交叉窗口必须合理
-    assert tp['F_A_EXIT_S'] < tp['F_A_EXIT_E'], 'A退场窗口起点必须 < 终点'
-    assert tp['F_B_EXIT_S'] < tp['F_B_EXIT_E'], 'B退场窗口起点必须 < 终点'
-    assert tp['F_A_EXIT_E'] <= tp['F_B_EXIT_S'], 'A退场结束必须 <= B退场开始（两段不重叠）'
-    assert tp['F_B_EXIT_E'] <= F, f'B退场结束({tp["F_B_EXIT_E"]}) 必须 <= F_TOTAL({F})'
-    # 每个元素时间轴合法
-    for label, tl in [('A', d['a_timeline']), ('B', d['b_timeline'])]:
-        for item in tl:
+    assert F > 0, 'F_TOTAL 必须 > 0'
+    assert 2 <= tp.get('scene_count', 0) <= 4, 'scene_count 必须为 2-4'
+    for win in tp.get('scene_windows', []):
+        assert 0 <= win['in_start'] < F, f'{win["label"]} 入场起点非法'
+        assert win['in_start'] < win['exit_start'] < win['exit_end'] <= F, f'{win["label"]} 展示/退场窗口非法'
+    for scene in d.get('scene_timelines', []):
+        label = scene['label']
+        for item in scene['timeline']:
             assert item['in_start'] < item['in_end'], f'{label} 入场窗口起点必须 < 终点'
             assert item['in_end'] <= item['hold_end'], f'{label} 入场结束必须 <= 展示结束'
-            assert item['out_start'] <= item['out_end'], f'{label} 退场窗口起点必须 < 终点'
+            assert item['out_start'] < item['out_end'], f'{label} 退场窗口起点必须 < 终点'
             assert item['out_end'] <= F, f'{label} 退场结束({item["out_end"]}) > F_TOTAL({F})'
-    _ok(2, f'时间轴 F={F} 交叉={tp["F_A_EXIT_S"]}→{tp["F_A_EXIT_E"]} B退={tp["F_B_EXIT_S"]}→{tp["F_B_EXIT_E"]}')
+    spans = ' '.join(f'{w["label"]}:{w["in_start"]}→{w["exit_end"]}' for w in tp.get('scene_windows', []))
+    _ok(2, f'时间轴 {tp["scene_count"]}画面 F={F} CROSS={tp["CROSS_WIN"]} {spans}')
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Stage 3: Keyframes — 参考动效风格（位移飞入飞出 + 旋转 + 错峰）
 # 缓动：ease-in-out (0.33,0,0.67,1) 标准 + (0.167,0.1,0.667,1) 装饰弹性
-# 空帧策略：A组 opacity=100 恒定（位置控制可见性），B组 opacity 动画
+# 空帧策略：仅文案层使用中心点触发 opacity 动画，非文案层保持源 opacity 不变
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # 参考动效缓动曲线
@@ -788,6 +1021,37 @@ def _is_decoration(nm):
     """判断是否装饰元素（气球/星星等）"""
     keywords = ['气球', '星星', '五角星', 'joy', '星']
     return any(k in nm.lower() for k in keywords)
+
+def _is_copy_layer(l):
+    """判断是否为需要透明度编排的文案层。
+    Figma/Lottie 导出常把文字栅格化为图片层，所以优先用图层名语义兜底。
+    """
+    nm = (l.get('nm') or '').lower()
+    text = (l.get('text') or '').lower()
+    raw = f'{nm} {text}'
+    if l.get('ty') == 5 or text.strip():
+        return True
+
+    non_copy_keywords = [
+        '背景', '前景', '腰带', '装饰', '花', '蝴蝶', '商品', '产品', '人物',
+        '模特', '人像', '氛围', '彩带', '光效', '烟花', '星星', '气球',
+        'bg', 'background', 'deco', 'decoration', 'product', 'model',
+    ]
+    if any(k in raw for k in non_copy_keywords):
+        return False
+
+    copy_keywords = [
+        '文案', '标题', 'title', '价格', '优惠', '满减', '折扣', '补贴',
+        '券', '低至', '直降', '立减', '礼遇', '好物', '美妆', '护肤',
+        '节', '起', '折', '省', '买', '赠', '福利', '权益', '促销',
+        'sale', 'coupon', 'discount', 'off',
+    ]
+    if any(k in raw for k in copy_keywords):
+        return True
+
+    has_digit = any(ch.isdigit() for ch in raw)
+    has_price_symbol = any(ch in raw for ch in ['¥', '￥', '%'])
+    return has_digit or has_price_symbol
 
 def _kf(t, s, ei=None, eo=None):
     if ei is None: ei = EASE_STD_I
@@ -818,6 +1082,87 @@ def _get_flight_distance(x, y, direction, aw, ah, ax, ay, sx, sy, W, H):
     else:
         # center: 从下方飞入
         return (0, (H + margin) - vt)
+
+def _layer_bounds_at(l, px, py):
+    ax, ay = l['anc'][0], l['anc'][1]
+    sx, sy = l['scl'][0] / 100.0, l['scl'][1] / 100.0
+    aw, ah = l.get('aw', 100), l.get('ah', 100)
+    left = px - ax * sx
+    top = py - ay * sy
+    right = left + aw * sx
+    bottom = top + ah * sy
+    return left, top, right, bottom
+
+def _layer_center_at(l, px, py):
+    left, top, right, bottom = _layer_bounds_at(l, px, py)
+    return ((left + right) / 2, (top + bottom) / 2)
+
+def _bounds_fully_inside(bounds, W, H):
+    left, top, right, bottom = bounds
+    return left >= 0 and top >= 0 and right <= W and bottom <= H
+
+def _interp_point(a, b, f):
+    return (a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f)
+
+def _first_fraction_for_predicate(l, start_xy, end_xy, W, H, predicate):
+    if predicate(_layer_bounds_at(l, start_xy[0], start_xy[1]), W, H):
+        return 0.0
+    if not predicate(_layer_bounds_at(l, end_xy[0], end_xy[1]), W, H):
+        return 1.0
+    lo, hi = 0.0, 1.0
+    for _ in range(18):
+        mid = (lo + hi) / 2
+        px, py = _interp_point(start_xy, end_xy, mid)
+        if predicate(_layer_bounds_at(l, px, py), W, H):
+            hi = mid
+        else:
+            lo = mid
+    return hi
+
+def _first_fraction_not_fully_inside(l, start_xy, end_xy, W, H):
+    if not _bounds_fully_inside(_layer_bounds_at(l, start_xy[0], start_xy[1]), W, H):
+        return 0.0
+    if _bounds_fully_inside(_layer_bounds_at(l, end_xy[0], end_xy[1]), W, H):
+        return 1.0
+    lo, hi = 0.0, 1.0
+    for _ in range(18):
+        mid = (lo + hi) / 2
+        px, py = _interp_point(start_xy, end_xy, mid)
+        if _bounds_fully_inside(_layer_bounds_at(l, px, py), W, H):
+            lo = mid
+        else:
+            hi = mid
+    return hi
+
+def _dedupe_kfs(kfs):
+    by_t = {}
+    for kf in kfs:
+        by_t[int(kf['t'])] = kf
+    return [by_t[t] for t in sorted(by_t)]
+
+def _opacity_trigger_value(l, direction, W, H, phase):
+    point = l.get(f'opacity_{phase}_point') or l.get('opacity_trigger_point')
+    axis = 0 if direction in ('left', 'right') else 1
+    if isinstance(point, (list, tuple)) and len(point) >= 2:
+        return float(point[axis])
+    if direction == 'left':
+        return 0.0
+    if direction == 'right':
+        return float(W)
+    if direction == 'top':
+        return 0.0
+    return float(H)
+
+def _center_trigger_fraction(l, start_xy, end_xy, direction, W, H, phase):
+    axis = 0 if direction in ('left', 'right') else 1
+    target = _opacity_trigger_value(l, direction, W, H, phase)
+    start_center = _layer_center_at(l, start_xy[0], start_xy[1])[axis]
+    end_center = _layer_center_at(l, end_xy[0], end_xy[1])[axis]
+    delta = end_center - start_center
+    if abs(delta) < 1e-6:
+        return 1.0
+    f = (target - start_center) / delta
+    return max(0.0, min(1.0, f))
 
 def _build_pos_kfs_style(l, in_start, in_end, out_start, out_end, W, H, fps):
     """参考动效风格 position 关键帧
@@ -946,40 +1291,69 @@ def _build_rot_kfs_style(l, in_start, in_end, out_start, out_end, base_rot, fps)
 
     return sorted(kfs, key=lambda k: k['t'])
 
-def _build_opa_kfs_style(l, in_start, in_end, out_start, out_end, is_a_group, fps):
-    """参考动效风格 opacity 关键帧
-    A组: opacity 恒定 100（位置控制空帧，避免渲染器兼容性问题）
-    B组: opacity 动画（快速淡入淡出，装饰类更快）
-    淡入淡出时长以秒定义再按 fps 换算。
+def _build_opa_kfs_style(l, in_start, in_end, out_start, out_end, W, H, fps):
+    """文案层中心点触发 opacity 关键帧。
+    入场：文案中心点到达画布边缘线或指定点位后开始淡入，到固定点时为原始 opacity。
+    出场：从固定点离场后开始渐隐，文案中心点到达画布边缘线或指定点位时为 0。
     """
-    if is_a_group:
-        # A组：恒定 100，纯靠位置控制可见性
-        return None  # 返回 None 表示用静态 opacity
+    x, y, _ = l['pos']
+    ax, ay = l['anc'][0], l['anc'][1]
+    sx, sy = l['scl'][0] / 100.0, l['scl'][1] / 100.0
+    aw, ah = l.get('aw', 100), l.get('ah', 100)
+    dx, dy = _get_flight_distance(x, y, l['dir'], aw, ah, ax, ay, sx, sy, W, H)
 
-    # B组：快速淡入 → 展示 → 快速淡出
-    is_deco = _is_decoration(l.get('nm', ''))
-    # 淡入时长（秒→帧）：装饰类 T_FADE_DECO，普通类 T_FADE_STD
-    fade_f = _s2f(T_FADE_DECO if is_deco else T_FADE_STD, fps)
-    ei = EASE_BOUNCE_I if is_deco else EASE_STD_I
-    eo = EASE_BOUNCE_O if is_deco else EASE_STD_O
+    windup_ratio = 0.15
+    entry_xy = (x + dx, y + dy)
+    in_windup_xy = (x + dx * (1 + windup_ratio), y + dy * (1 + windup_ratio))
+    out_windup_xy = (x - dx * windup_ratio, y - dy * windup_ratio)
+    base_xy = (x, y)
 
-    kfs = []
-    if in_start > 0:
-        kfs.append(_kf(0, [0], ei, eo))  # 首帧空帧
-    kfs.append(_kf(in_start,  [0],    ei, eo))  # 入场起点
-    kfs.append(_kf(in_start + fade_f, [100], ei, eo))  # 快速淡入
-    kfs.append(_kf(out_end - fade_f,  [100], ei, eo))  # 展示
-    kfs.append(_kf(out_end,  [0],    ei, eo))  # 退场淡出
-    return sorted(kfs, key=lambda k: k['t'])
+    bounce_dur_f = _s2f(T_BOUNCE, fps)
+    windup_dur_f = _s2f(T_WINDUP, fps)
+    windup_min_f = _s2f(T_WINDUP_MIN, fps)
+    fixed_t = min(in_end + bounce_dur_f, out_start - 1)
+    in_move_start = in_start if in_start > 0 else windup_dur_f
+    in_move_start = min(in_move_start, max(0, fixed_t - 1))
+
+    out_windup_dur_f = min(windup_dur_f, max(windup_min_f, (out_end - out_start) // 3))
+    out_move_start = min(out_start + out_windup_dur_f, max(out_start, out_end - 1))
+
+    in_frac = _center_trigger_fraction(l, in_windup_xy, base_xy, l['dir'], W, H, 'in')
+    fade_in_start = round(in_move_start + (fixed_t - in_move_start) * in_frac)
+    fade_in_start = max(0, min(fade_in_start, fixed_t - 1))
+    fade_in_end = max(fade_in_start + 1, fixed_t)
+
+    out_frac = _center_trigger_fraction(l, out_windup_xy, entry_xy, l['dir'], W, H, 'out')
+    fade_out_end = round(out_move_start + (out_end - out_move_start) * out_frac)
+    fade_out_end = max(out_move_start + 1, min(fade_out_end, out_end))
+    fade_out_start = max(fade_in_end, out_move_start)
+    if fade_out_start >= fade_out_end:
+        fade_out_start = max(fade_in_end, fade_out_end - 1)
+
+    target_opa = l.get('opa', 100)
+    if target_opa is None:
+        target_opa = 100
+
+    # Opacity 始终用标准 ease，避免透明度出现弹性或突变。
+    kfs = [
+        _kf(0, [0], EASE_STD_I, EASE_STD_O),
+        _kf(fade_in_start, [0], EASE_STD_I, EASE_STD_O),
+        _kf(fade_in_end, [target_opa], EASE_STD_I, EASE_STD_O),
+        _kf(fade_out_start, [target_opa], EASE_STD_I, EASE_STD_O),
+        _kf(fade_out_end, [0], EASE_STD_I, EASE_STD_O),
+        _kf(out_end, [0], EASE_STD_I, EASE_STD_O),
+    ]
+    return _dedupe_kfs(kfs)
 
 def _make_anim_layer_style(l, tag, in_start, in_end, out_start, out_end, W, H, F_TOTAL, fps):
     """参考动效风格动画层：位移 + 旋转 + opacity策略"""
     pos_kfs = _build_pos_kfs_style(l, in_start, in_end, out_start, out_end, W, H, fps)
     rot_kfs = _build_rot_kfs_style(l, in_start, in_end, out_start, out_end, l['rot'], fps)
-    is_a = (tag == 'a')
-    opa_kfs = _build_opa_kfs_style(l, in_start, in_end, out_start, out_end, is_a, fps)
+    is_copy = _is_copy_layer(l)
+    opa_kfs = _build_opa_kfs_style(l, in_start, in_end, out_start, out_end, W, H, fps) if is_copy else None
 
     layer = _layer_base(l, tag, F_TOTAL)
+    layer['_is_copy'] = is_copy
     
     # 展示阶段时间范围（用于 Stage 4 hold 动效）
     bounce_dur_f = _s2f(T_BOUNCE, fps)
@@ -990,24 +1364,13 @@ def _make_anim_layer_style(l, tag, in_start, in_end, out_start, out_end, W, H, F
     layer['_aw'] = l.get('aw', 0) or 0
     layer['_ah'] = l.get('ah', 0) or 0
     
-    if opa_kfs is None:
-        # A组：opacity 静态 100
-        layer["ks"] = {
-            "o": {"a": 0, "k": 100},
-            "r": {"a": 1, "k": rot_kfs},
-            "p": {"a": 1, "k": pos_kfs},
-            "a": {"a": 0, "k": l['anc']},
-            "s": {"a": 0, "k": l['scl']},
-        }
-    else:
-        # B组：opacity 动画
-        layer["ks"] = {
-            "o": {"a": 1, "k": opa_kfs},
-            "r": {"a": 1, "k": rot_kfs},
-            "p": {"a": 1, "k": pos_kfs},
-            "a": {"a": 0, "k": l['anc']},
-            "s": {"a": 0, "k": l['scl']},
-        }
+    layer["ks"] = {
+        "o": {"a": 1, "k": opa_kfs} if is_copy else {"a": 0, "k": l['opa']},
+        "r": {"a": 1, "k": rot_kfs},
+        "p": {"a": 1, "k": pos_kfs},
+        "a": {"a": 0, "k": l['anc']},
+        "s": {"a": 0, "k": l['scl']},
+    }
     return layer
 
 def stage_keyframes(timeline_out):
@@ -1021,16 +1384,25 @@ def stage_keyframes(timeline_out):
     # 静态顶层
     for l in timeline_out['static_top']:
         out_layers.append(_make_static_layer(l, 'a', F_TOTAL))
-    # B 前景
-    for item in timeline_out['b_timeline']:
-        l = item['layer']
-        out_layers.append(_make_anim_layer_style(l, 'b',
-            item['in_start'], item['in_end'], item['out_start'], item['out_end'], W, H, F_TOTAL, fps))
-    # A 前景
-    for item in timeline_out['a_timeline']:
-        l = item['layer']
-        out_layers.append(_make_anim_layer_style(l, 'a',
-            item['in_start'], item['in_end'], item['out_start'], item['out_end'], W, H, F_TOTAL, fps))
+
+    scene_timelines = timeline_out.get('scene_timelines')
+    if not scene_timelines:
+        scene_timelines = [
+            {'tag': 'a', 'label': 'A', 'timeline': timeline_out.get('a_timeline', [])},
+            {'tag': 'b', 'label': 'B', 'timeline': timeline_out.get('b_timeline', [])},
+        ]
+
+    # 后出现的画面放在更上层，交叉切换时入场层不被旧画面压住
+    for scene in reversed(scene_timelines):
+        tag = scene['tag']
+        for item in scene['timeline']:
+            l = item['layer']
+            out_layers.append(_make_anim_layer_style(
+                l, tag,
+                item['in_start'], item['in_end'], item['out_start'], item['out_end'],
+                W, H, F_TOTAL, fps
+            ))
+
     # 静态底层
     for l in timeline_out['static_bot']:
         out_layers.append(_make_static_layer(l, 'a', F_TOTAL))
@@ -1053,9 +1425,13 @@ def _layer_base(l, tag, F_TOTAL):
     if l.get('tt') is not None:         layer['tt'] = l['tt']
     if l.get('td') is not None:         layer['td'] = l['td']
     if l['ty'] == 4 and l.get('shapes'): layer['shapes'] = l['shapes']
+    if l['ty'] == 5 and l.get('t'):      layer['t'] = deepcopy(l['t'])
     if l['ty'] == 0:
         if l.get('w'): layer['w'] = l['w']
         if l.get('h'): layer['h'] = l['h']
+    if l.get('ef'):                     layer['ef'] = deepcopy(l['ef'])
+    if l.get('masksProperties'):        layer['masksProperties'] = deepcopy(l['masksProperties'])
+    if l.get('hd') is not None:         layer['hd'] = l['hd']
     if l.get('parent') is not None:     layer['parent'] = l['parent']
     return layer
 
@@ -1101,7 +1477,7 @@ def stage_keyframes_check(d):
             for ki, kf in enumerate(kfs):
                 if kf.get('s') is None:
                     issues.append(f'{nm}.{prop}[{ki}]@t={kf["t"]} s=None')
-    # opacity 策略验证：A组 opacity 必须静态(a=0,k=100)，B组 opacity 必须动画(a=1)
+    # opacity 策略验证：文案运动层使用中心点触发 opacity 动画，非文案运动层保持源 opacity 静态
     for i, l in enumerate(d['layers']):
         nm = l.get('nm', f'layer_{i}')
         ks = l.get('ks', {})
@@ -1110,14 +1486,21 @@ def stage_keyframes_check(d):
         # 只检查动画层（p 有动画的）
         if p_pk.get('a') == 1:
             tag = l.get('_tag', '')
-            if tag == 'a':
-                # A组：opacity 应该静态 100
-                if o_pk.get('a') != 0 or o_pk.get('k') != 100:
-                    issues.append(f'{nm} A组 opacity 应为静态100，实际 a={o_pk.get("a")} k={o_pk.get("k")}')
-            elif tag == 'b':
-                # B组：opacity 应该有动画
-                if o_pk.get('a') != 1:
-                    issues.append(f'{nm} B组 opacity 应为动画，实际 a={o_pk.get("a")}')
+            if tag in SCENE_TAGS:
+                if l.get('_is_copy'):
+                    if o_pk.get('a') != 1:
+                        issues.append(f'{nm} {_tag_label(tag)}组文案 opacity 应为中心点触发动画，实际 a={o_pk.get("a")}')
+                        continue
+                    o_kfs = o_pk.get('k', [])
+                    if not o_kfs:
+                        issues.append(f'{nm} {_tag_label(tag)}组文案 opacity 关键帧为空')
+                        continue
+                    first_val = o_kfs[0].get('s', [None])[0]
+                    last_val = o_kfs[-1].get('s', [None])[0]
+                    if first_val != 0 or last_val != 0:
+                        issues.append(f'{nm} {_tag_label(tag)}组文案 opacity 必须 0 开始/0 结束，实际 {first_val}->{last_val}')
+                elif o_pk.get('a') != 0:
+                    issues.append(f'{nm} {_tag_label(tag)}组非文案 opacity 应保持静态，实际 a={o_pk.get("a")}')
     if issues:
         _fail(3, f'{len(issues)} 个关键帧问题: {issues[:5]}...')
     _ok(3, f'关键帧生成 {len(d["layers"])} 层，时间戳+维度+opacity策略全部合法')
@@ -1128,7 +1511,7 @@ def stage_keyframes_check(d):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _parse_deco_arg(arg):
-    """解析 --deco 参数：格式 'A_8,A_9,B_5,B_8' → [('a', 8), ('a', 9), ('b', 5), ('b', 8)]"""
+    """解析 --deco 参数：格式 'A_8,B_5,C_3,D_7' → [('a', 8), ('b', 5), ...]"""
     items = []
     if not arg:
         return items
@@ -1141,14 +1524,14 @@ def _parse_deco_arg(arg):
             tag = tag.lower()
             try:
                 ind = int(ind)
-                if tag in ('a', 'b'):
+                if tag in SCENE_TAGS:
                     items.append((tag, ind))
             except ValueError:
                 pass
     return items
 
 def _parse_highlight_arg(arg):
-    """解析 --highlight 参数：格式 'A_5:scale,B_4:rotate' → {('a', 5): 'scale', ('b', 4): 'rotate'}"""
+    """解析 --highlight 参数：格式 'A_5:scale,C_4:scale' → {('a', 5): 'scale', ('c', 4): 'scale'}"""
     mapping = {}
     if not arg:
         return mapping
@@ -1162,7 +1545,7 @@ def _parse_highlight_arg(arg):
             tag = tag.lower()
             try:
                 ind = int(ind)
-                if tag in ('a', 'b') and anim_type in ('scale', 'rotate'):
+                if tag in SCENE_TAGS and anim_type in ('scale', 'rotate'):
                     mapping[(tag, ind)] = anim_type
             except ValueError:
                 pass
@@ -1409,8 +1792,8 @@ def stage_assemble(hold_out):
                 l['parent'] = orig_ind_to_new[key]
             else:
                 del l['parent']
-        del l['_tag']
-        del l['_orig_ind']
+        l.pop('_tag', None)
+        l.pop('_orig_ind', None)
         l.pop('_hold_start', None)
         l.pop('_hold_end', None)
         l.pop('_aw', None)
@@ -1439,6 +1822,10 @@ def stage_assemble(hold_out):
         "w": meta['w'], "h": meta['h'], "nm": "Merged", "ddd": 0,
         "assets": assets, "layers": out_layers,
     }
+    if meta.get('fonts'):
+        output['fonts'] = meta['fonts']
+    if meta.get('chars'):
+        output['chars'] = meta['chars']
     return output, loop_fixed
 
 def stage_assemble_check(output, loop_fixed):
@@ -1456,25 +1843,12 @@ def stage_assemble_check(output, loop_fixed):
 # Stage 5: Preview — 单一模板生成 fetch/embedded 预览
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _build_preview_html(mode, output, output_dir=None, json_str=None):
-    """单一模板：fetch/embedded 共用，仅 jsonData 赋值方式不同。
-    output 用于读取 w/h 动态计算预览尺寸。"""
+def _build_preview_html(mode, json_str=None):
+    """单一模板：fetch/embedded 共用，仅 jsonData 赋值方式不同"""
     assert mode in ('fetch', 'embedded'), f'unknown mode: {mode}'
-    assert mode in ('fetch', 'embedded'), f'unknown mode: {mode}'
-    # 预览尺寸：原尺寸 ≤ 800px 宽度用 1x，否则 0.5x
-    src_w, src_h = output.get('w', 1125), output.get('h', 600)
-    if hasattr(src_w, 'get'):  # 防御：某些序列化后 w 可能是 dict
-        src_w, src_h = 1125, 600
-    if src_w <= 800:
-        preview_w, preview_h = int(src_w), int(src_h)
-        aspect_hint = ''
-    else:
-        preview_w, preview_h = int(src_w // 2), int(src_h // 2)
-        aspect_hint = f' (原尺寸: {src_w}×{src_h})'
-
     if mode == 'embedded':
         assert json_str is not None, 'embedded 模式需要 json_str'
-        title = 'Lottie 切换动效预览（内嵌模式）' + aspect_hint
+        title = 'Lottie 切换动效预览（内嵌模式）'
         # 计算 JSON 文件大小（bytes → KB/MB）
         size_bytes = len(json_str.encode('utf-8'))
         if size_bytes >= 1024 * 1024:
@@ -1482,32 +1856,18 @@ def _build_preview_html(mode, output, output_dir=None, json_str=None):
         else:
             size_str = f'{size_bytes / 1024:.0f} KB'
         json_line = f'var jsonData = {json_str};\nwindow.__JSON_SIZE__ = "{size_str}";'
-        # embedded 版本：将 lottie.min.js 和 FileSaver.min.js 内联到 HTML 中
-        # 避免 file:// 协议下外部脚本加载被浏览器安全策略阻止
-        lottie_path = os.path.join(output_dir, 'lottie.min.js') if output_dir else 'lottie.min.js'
-        fs_path = os.path.join(output_dir, 'FileSaver.min.js') if output_dir else 'FileSaver.min.js'
-        inline_scripts = []
-        try:
-            with open(lottie_path, 'r', encoding='utf-8') as f:
-                lottie_src = f.read()
-            inline_scripts.append(f'<script>\n{lottie_src}\n</script>')
-        except Exception as e:
-            print(f'⚠️ 内联 lottie.min.js 失败: {e}，回退到外部引用')
-            inline_scripts.append('<script src="lottie.min.js"></script>')
-        try:
-            with open(fs_path, 'r', encoding='utf-8') as f:
-                fs_src = f.read()
-            inline_scripts.append(f'<script>\n{fs_src}\n</script>')
-        except Exception as e:
-            print(f'⚠️ 内联 FileSaver.min.js 失败: {e}，回退到外部引用')
-            inline_scripts.append('<script src="FileSaver.min.js"></script>')
-        lib_scripts = '\n'.join(inline_scripts)
-        bootstrap = """st.textContent = '初始化动画...';
-if (typeof lottie === 'undefined') { st.style.color = '#f88'; st.textContent = '❌ Lottie库未加载（脚本内联失败）'; }
-else if (document.readyState === 'complete') { initAnimation(); }
-else { window.addEventListener('load', function() { initAnimation(); }); }"""
+        # embedded 版本引用本地 JS 文件（无需联网）
+        lib_scripts = '<script src="lottie.min.js"></script>\n<script src="FileSaver.min.js"></script>'
+        bootstrap = """st.textContent = 'Lottie库加载中...';
+function tryInitLottie(retry) {
+  if (typeof lottie !== 'undefined') { initAnimation(); return; }
+  if (retry > 30) { st.style.color = '#f88'; st.textContent = '❌ Lottie库未加载，请确保 lottie.min.js 在同一目录'; return; }
+  setTimeout(function() { tryInitLottie(retry + 1); }, 100);
+}
+if (document.readyState === 'complete') { tryInitLottie(0); }
+else { window.addEventListener('load', function() { tryInitLottie(0); }); }"""
     else:
-        title = 'Lottie 切换动效预览' + aspect_hint
+        title = 'Lottie 切换动效预览'
         json_line = 'var jsonData = null;\nwindow.__JSON_SIZE__ = "";'
         # fetch 版本不内嵌本地库，继续使用 CDN 加载
         lib_scripts = ''
@@ -1541,7 +1901,7 @@ fetch('merged_output.json?t=' + ts)
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#1a1a2e;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;font-family:-apple-system,sans-serif;color:#eee}
 h2{margin-bottom:16px;font-weight:400;color:#aaa;font-size:16px}
-#lc{width:''' + str(preview_w) + '''px;height:''' + str(preview_h) + '''px;background:#222;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,.4)}
+#lc{width:562px;height:300px;background:#222;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,.4)}
 .ctl{margin-top:20px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;justify-content:center}
 button{padding:8px 20px;border:1px solid #555;border-radius:6px;background:#2a2a4a;color:#eee;cursor:pointer;font-size:14px}
 button:hover{background:#3a3a6a}
@@ -1625,9 +1985,9 @@ def stage_preview(output, output_dir):
             print(f"  ⚠️ 下载 {filename} 失败: {e}")
     
     with open(preview_fetch, 'w', encoding='utf-8') as f:
-        f.write(_build_preview_html('fetch', output, output_dir))
+        f.write(_build_preview_html('fetch'))
     with open(preview_embedded, 'w', encoding='utf-8') as f:
-        f.write(_build_preview_html('embedded', output, output_dir, json_str))
+        f.write(_build_preview_html('embedded', json_str))
     
     return preview_fetch, preview_embedded
 
@@ -1661,7 +2021,7 @@ STAGE_FILES = {
     4: 'pipeline/04_hold_anim.json',
 }
 
-def run_pipeline(file_a, file_b, output_dir, from_stage=0, to_stage=6, timeline_params=None, deco_items=None, highlight_items=None):
+def run_pipeline(input_files, output_dir, from_stage=0, to_stage=6, timeline_params=None, deco_items=None, highlight_items=None):
     """运行流水线，支持局部重跑。
     返回 (output_path, meta_info) 其中 meta_info 包含 auto_deco/auto_highlight 信息。"""
     os.makedirs(output_dir, exist_ok=True)
@@ -1672,7 +2032,7 @@ def run_pipeline(file_a, file_b, output_dir, from_stage=0, to_stage=6, timeline_
 
     # ── Stage 0 ──
     if from_stage <= 0 <= to_stage:
-        parse_out = stage_parse(file_a, file_b)
+        parse_out = stage_parse(input_files)
         stage_parse_check(parse_out)
         _write_json(os.path.join(output_dir, STAGE_FILES[0]), parse_out)
     else:
@@ -1775,13 +2135,11 @@ def run_pipeline(file_a, file_b, output_dir, from_stage=0, to_stage=6, timeline_
 
 def main():
     parser = argparse.ArgumentParser(description='Lottie 静帧合并动效 — 分阶段流水线')
-    parser.add_argument('file_a', nargs='?', help='场景 A JSON（全跑模式必需，局部重跑可省略）')
-    parser.add_argument('file_b', nargs='?', help='场景 B JSON（全跑模式必需，局部重跑可省略）')
-    parser.add_argument('output_dir', nargs='?', default='./output', help='输出目录')
+    parser.add_argument('paths', nargs='*', help='全跑: 2-4 个场景 JSON + 可选输出目录；局部重跑: 输出目录')
     parser.add_argument('--from', dest='from_stage', type=int, default=0, help='从哪个阶段开始 (0-6)')
     parser.add_argument('--to', dest='to_stage', type=int, default=6, help='到哪个阶段结束 (0-6)')
-    parser.add_argument('--deco', default='', help='装饰元素列表，格式：A_8,A_9,B_5,B_8')
-    parser.add_argument('--highlight', default='', help='突出元素列表，格式：A_5:scale,B_4:rotate')
+    parser.add_argument('--deco', default='', help='装饰元素列表，格式：A_8,B_5,C_3,D_7')
+    parser.add_argument('--highlight', default='', help='突出元素列表，格式：A_5:scale,C_4:scale')
     args = parser.parse_args()
 
     # 解析 --deco 和 --highlight
@@ -1789,18 +2147,23 @@ def main():
     highlight_map = _parse_highlight_arg(args.highlight)
     highlight_items = [(tag, ind, h_type) for (tag, ind), h_type in highlight_map.items()]
 
+    output_dir = './output'
+    input_files = None
+
     # 局部重跑模式：from_stage > 0 时，第一个位置参数是 output_dir
     if args.from_stage > 0:
-        # 重新解释位置参数：file_a 实际是 output_dir
-        if args.file_a:
-            args.output_dir = args.file_a
-            args.file_a = None
-        args.file_b = None
+        if args.paths:
+            output_dir = args.paths[0]
     else:
-        if not args.file_a or not args.file_b:
-            parser.error('全跑模式需要 file_a 和 file_b 参数\n  用法: python generate_merged_lottie_pipeline.py a.json b.json output/')
+        paths = list(args.paths)
+        if paths and not paths[-1].lower().endswith('.json'):
+            output_dir = paths[-1]
+            paths = paths[:-1]
+        input_files = paths
+        if not (2 <= len(input_files) <= 4):
+            parser.error('全跑模式需要 2-4 个 JSON\n  用法: python generate_merged_lottie_pipeline.py a.json b.json [c.json d.json] [output/]')
 
-    _, meta = run_pipeline(args.file_a, args.file_b, args.output_dir,
+    _, meta = run_pipeline(input_files, output_dir,
                            args.from_stage, args.to_stage,
                            deco_items=deco_items, highlight_items=highlight_items)
 

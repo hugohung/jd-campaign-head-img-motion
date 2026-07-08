@@ -1,14 +1,17 @@
 # 京东会场头图 Lottie 动效延展 (jd-campaign-head-img-motion)
 
-> 将两个静帧 Lottie JSON 合并为带切帧动效的 Lottie JSON，自动识别静态图层并生成平滑的入场/退场动画。
+> 将 2-4 个静帧 Lottie JSON 合并为带切帧动效的循环 Lottie JSON，自动识别静态图层并生成平滑的入场/退场动画。支持 Figma 插件导出的顶层 `Clip Mask + Content` 画布包装。
 
 ## 效果演示
 
-[▶️ 点击观看演示视频](https://github.com/hugohung/jd-campaign-head-img-motion/releases/download/v9.7.0/demo.mp4)
+[▶️ 点击观看演示视频](https://github.com/hugohung/jd-campaign-head-img-motion/releases/download/v9.7.2/demo.mp4)
 
 ## 功能特性
 
 - 🎯 **自动识别静态图层** — 背景、腰封等不变元素自动保持不动
+- 🧩 **支持 2-4 个画面** — 旧的双图输入继续可用，也可输入 3/4 个静态 JSON 生成多段循环
+- 🎨 **Figma 导出兼容** — 自动展开顶层 `Clip Mask + Content`，把 `Content` comp 作为真实动效图层来源
+- 🫧 **文案透明度编排** — 文案层以中心点到达画布边缘或指定点位触发渐现/渐隐，非文案元素保持源透明度
 - ✨ **智能方向分配** — 根据元素在画布中的位置，自动选择入场/退场方向（左/右/下/中）
 - 🎬 **专业动效参数** — 弹性缓动曲线 + 过冲回弹效果 + 垂直错帧延迟
 - 🔗 **完整属性保留** — parent 父子关系、旋转、锚点、混合模式全部保留
@@ -23,32 +26,34 @@
 # 2. WorkBuddy → 技能管理 → 上传技能
 
 # 使用
-python scripts/generate_merged_lottie.py <场景A.json> <场景B.json> [输出目录]
+python scripts/generate_merged_lottie_pipeline.py <场景A.json> <场景B.json> [场景C.json] [场景D.json] [输出目录]
 
 # 预览
+# 本地直接打开 preview_embedded.html；或起服务查看 preview.html
 cd 输出目录 && python -m http.server 8770
-# 浏览器打开 http://localhost:8770/preview.html
 ```
 
 ## 输入输出
 
 ```
-输入：场景A.json（初始状态）+ 场景B.json（变化状态）
+输入：场景A.json + 场景B.json + 可选场景C.json/场景D.json
       ↓ 脚本自动处理
 输出：merged_output.json（合并后的动效文件）
      preview.html（预览页面，含播放/暂停/速度/下载功能）
+     preview_embedded.html（本地文件预览页面，无需起服务）
 ```
 
 **输入要求：**
-- 两个 Lottie JSON 文件
+- 2-4 个 Lottie JSON 文件
 - 尺寸相同（宽 × 高一致）
-- 背景层相同，前景层不同
+- 背景层相同或相近，前景层不同
+- Figma 插件导出的顶层 `Clip Mask + Content` 会自动展开
 
 ## 工作原理
 
 ### 1. 图层分类
 
-脚本自动对比两个文件的每个图层，通过 7 维度匹配判断是否为「静态图层」：
+脚本自动对比所有输入文件的每个图层，通过 7 维度匹配判断是否为「全场景静态图层」：
 
 | 匹配维度 | 说明 |
 |----------|------|
@@ -82,7 +87,7 @@ cd 输出目录 && python -m http.server 8770
 
 ```bash
 # 运行示例
-python scripts/generate_merged_lottie.py examples/scene-a.json examples/scene-b.json examples/
+python scripts/generate_merged_lottie_pipeline.py examples/scene-a.json examples/scene-b.json examples/
 
 # 预览示例输出
 cd examples && python -m http.server 8770
@@ -108,7 +113,7 @@ jd-campaign-head-img-motion/
 ├── README.md                       # 本文件
 ├── LICENSE                         # MIT 协议
 ├── scripts/
-│   └── generate_merged_lottie.py   # 主脚本 (~35KB)
+│   └── generate_merged_lottie_pipeline.py # 主脚本（分阶段流水线）
 ├── references/
 │   ├── .gitkeep
 │   └── LOTTIE_BUG_CHECKLIST.md    # 排错自查表
