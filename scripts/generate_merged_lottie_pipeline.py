@@ -1843,8 +1843,10 @@ def stage_assemble_check(output, loop_fixed):
 # Stage 5: Preview — 单一模板生成 fetch/embedded 预览
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _build_preview_html(mode, json_str=None):
-    """单一模板：fetch/embedded 共用，仅 jsonData 赋值方式不同"""
+def _build_preview_html(mode, json_str=None, with_download=True):
+    """单一模板：fetch/embedded 共用，仅 jsonData 赋值方式不同。
+    with_download=False 用于本地工具 iframe，只保留播放控制，不放下载入口。
+    """
     assert mode in ('fetch', 'embedded'), f'unknown mode: {mode}'
     if mode == 'embedded':
         assert json_str is not None, 'embedded 模式需要 json_str'
@@ -1857,7 +1859,9 @@ def _build_preview_html(mode, json_str=None):
             size_str = f'{size_bytes / 1024:.0f} KB'
         json_line = f'var jsonData = {json_str};\nwindow.__JSON_SIZE__ = "{size_str}";'
         # embedded 版本引用本地 JS 文件（无需联网）
-        lib_scripts = '<script src="lottie.min.js"></script>\n<script src="FileSaver.min.js"></script>'
+        lib_scripts = '<script src="lottie.min.js"></script>'
+        if with_download:
+            lib_scripts += '\n<script src="FileSaver.min.js"></script>'
         bootstrap = """st.textContent = 'Lottie库加载中...';
 function tryInitLottie(retry) {
   if (typeof lottie !== 'undefined') { initAnimation(); return; }
@@ -1871,6 +1875,7 @@ else { window.addEventListener('load', function() { tryInitLottie(0); }); }"""
         json_line = 'var jsonData = null;\nwindow.__JSON_SIZE__ = "";'
         # fetch 版本不内嵌本地库，继续使用 CDN 加载
         lib_scripts = ''
+        after_init = 'loadFileSaver(function() {});' if with_download else ''
         bootstrap = """var ts = new Date().getTime();
 st.textContent = '正在加载动画数据...';
 fetch('merged_output.json?t=' + ts)
@@ -1889,62 +1894,28 @@ fetch('merged_output.json?t=' + ts)
       if (err) { st.style.color = '#f88'; st.textContent = '❌ Lottie库加载失败: ' + err.message + ' (请检查网络或刷新重试)'; return; }
       if (typeof lottie === 'undefined') { st.style.color = '#f88'; st.textContent = '❌ Lottie对象未定义'; return; }
       initAnimation();
-      loadFileSaver(function() {});
+      __AFTER_INIT__
     });
   })
-  .catch(function(err) { st.style.color = '#f88'; st.textContent = '❌ 数据加载失败: ' + err.message + ' (需通过 HTTP 服务器打开)'; });"""
+  .catch(function(err) { st.style.color = '#f88'; st.textContent = '❌ 数据加载失败: ' + err.message + ' (需通过 HTTP 服务器打开)'; });""".replace('__AFTER_INIT__', after_init)
 
-    return '''<!DOCTYPE html>
-<html lang="zh-CN">
-<head><meta charset="UTF-8"><title>__TITLE__</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{background:#1a1a2e;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;font-family:-apple-system,sans-serif;color:#eee}
-h2{margin-bottom:16px;font-weight:400;color:#aaa;font-size:16px}
-#lc{width:562px;height:300px;background:#222;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,.4)}
-.ctl{margin-top:20px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;justify-content:center}
-button{padding:8px 20px;border:1px solid #555;border-radius:6px;background:#2a2a4a;color:#eee;cursor:pointer;font-size:14px}
-button:hover{background:#3a3a6a}
-.sp button{background:#222}.sp button.active{background:#5a5aff;border-color:#5a5aff}
-#dl-btn{background:#1a4a2a;border-color:#2a7a4a;color:#7ef5a0}
+    download_controls = ''
+    download_css = ''
+    download_js = ''
+    fsaver_urls = ''
+    load_filesaver_js = ''
+    if with_download:
+        download_css = '''#dl-btn{background:#1a4a2a;border-color:#2a7a4a;color:#7ef5a0}
 #dl-btn:hover{background:#1e5a32}
-#download-name{height:34px;width:150px;border:1px solid #555;border-radius:6px;background:#111827;color:#eee;padding:0 10px;font-size:13px}
-#fi,#st{font-size:13px;margin-top:10px;min-height:20px}
-</style></head>
-<body>
-<h2>__TITLE__</h2>
-<div id="lc"></div>
-<div class="ctl">
-  <button onclick="doToggle()" id="btnToggle">&#9208; 暂停</button>
-  <button onclick="doReplay()">&#8634; 重播</button>
-  <div class="sp">
-    <button onclick="ss(0.5)" id="s0.5">0.5x</button>
-    <button onclick="ss(1)" id="s1" class="active">1x</button>
-    <button onclick="ss(2)" id="s2">2x</button>
-  </div>
-  <input id="download-name" type="text" value="会场头图" aria-label="下载文件名">
-  <button id="dl-btn" onclick="dlJson()">&#11015; 下载 JSON</button>
-</div>
-<div id="fi"></div>
-<div id="st" style="color:#ff8">加载中...</div>
-__LIB_SCRIPTS__
-<script>
-var st = document.getElementById('st');
-var fi = document.getElementById('fi');
-var anim = null;
-__JSON_LINE__
-
-var CDN_URLS = ["https://cdn.jsdelivr.net/npm/lottie-web@5.12.2/build/player/lottie.min.js","https://cdnjs.cloudflare.com/ajax/libs/lottie-web/5.12.2/lottie.min.js"];
-var FSAVER_URLS = ["https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js","https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"];
-var cdnIdx = 0;
-
-function doToggle() { if (!anim) return; var btn = document.getElementById('btnToggle'); if (anim.isPaused) { anim.play(); btn.innerHTML = '&#9208; 暂停'; } else { anim.pause(); btn.innerHTML = '&#9654; 播放'; } }
-function doReplay() { if (anim) { anim.goToAndPlay(0, true); document.getElementById('btnToggle').innerHTML = '&#9208; 暂停'; } }
-function ss(s) { if (anim) anim.setSpeed(s); document.querySelectorAll('.sp button').forEach(function(b) { b.classList.remove('active'); }); var btnId = 's' + s; var btn = document.getElementById(btnId); if (btn) btn.classList.add('active'); }
-function cleanFileName(value) {
+#download-name{height:34px;width:150px;border:1px solid #555;border-radius:6px;background:#111827;color:#eee;padding:0 10px;font-size:13px}'''
+        download_controls = '''  <input id="download-name" type="text" value="会场头图" aria-label="下载文件名">
+  <button id="dl-btn" onclick="dlJson()">&#11015; 下载 JSON</button>'''
+        fsaver_urls = 'var FSAVER_URLS = ["https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js","https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"];'
+        load_filesaver_js = "function loadFileSaver(cb) { var fsIdx = 0; function tryNext() { var s = document.createElement('script'); s.src = FSAVER_URLS[fsIdx]; s.onload = function() { cb(null); }; s.onerror = function() { fsIdx++; if (fsIdx < FSAVER_URLS.length) { tryNext(); } else { cb(new Error('FileSaver CDN 失败（降级使用原生下载）')); } }; document.head.appendChild(s); } tryNext(); }"
+        download_js = r'''function cleanFileName(value) {
   value = (value || '会场头图').replace(/[\\/:*?"<>|]/g, '-').trim();
   if (!value) value = '会场头图';
-  if (!/\\.json$/i.test(value)) value += '.json';
+  if (!/\.json$/i.test(value)) value += '.json';
   return value;
 }
 function nativeDownload(blob, filename) {
@@ -1967,16 +1938,63 @@ function dlJson() {
   var data = JSON.stringify(jsonData, null, 2);
   var blob = new Blob([data], {type: 'application/json;charset=utf-8'});
   try {
-    nativeDownload(blob, filename);
+    if (typeof saveAs === 'function') { saveAs(blob, filename); }
+    else { nativeDownload(blob, filename); }
     st.style.color = '#7ef5a0';
     st.textContent = '已开始下载 ' + filename;
   } catch (err) {
-    if (typeof saveAs === 'function') { saveAs(blob, filename); }
-    else { alert('下载失败：' + err.message); }
+    alert('下载失败：' + err.message);
   }
 }
+'''
+
+    return '''<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>__TITLE__</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#1a1a2e;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;font-family:-apple-system,sans-serif;color:#eee}
+h2{margin-bottom:16px;font-weight:400;color:#aaa;font-size:16px}
+#lc{width:562px;height:300px;background:#222;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,.4)}
+.ctl{margin-top:20px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;justify-content:center}
+button{padding:8px 20px;border:1px solid #555;border-radius:6px;background:#2a2a4a;color:#eee;cursor:pointer;font-size:14px}
+button:hover{background:#3a3a6a}
+.sp button{background:#222}.sp button.active{background:#5a5aff;border-color:#5a5aff}
+__DOWNLOAD_CSS__
+#fi,#st{font-size:13px;margin-top:10px;min-height:20px}
+</style></head>
+<body>
+<h2>__TITLE__</h2>
+<div id="lc"></div>
+<div class="ctl">
+  <button onclick="doToggle()" id="btnToggle">&#9208; 暂停</button>
+  <button onclick="doReplay()">&#8634; 重播</button>
+  <div class="sp">
+    <button onclick="ss(0.5)" id="s0.5">0.5x</button>
+    <button onclick="ss(1)" id="s1" class="active">1x</button>
+    <button onclick="ss(2)" id="s2">2x</button>
+  </div>
+__DOWNLOAD_CONTROLS__
+</div>
+<div id="fi"></div>
+<div id="st" style="color:#ff8">加载中...</div>
+__LIB_SCRIPTS__
+<script>
+var st = document.getElementById('st');
+var fi = document.getElementById('fi');
+var anim = null;
+__JSON_LINE__
+
+var CDN_URLS = ["https://cdn.jsdelivr.net/npm/lottie-web@5.12.2/build/player/lottie.min.js","https://cdnjs.cloudflare.com/ajax/libs/lottie-web/5.12.2/lottie.min.js"];
+__FSAVER_URLS__
+var cdnIdx = 0;
+
+function doToggle() { if (!anim) return; var btn = document.getElementById('btnToggle'); if (anim.isPaused) { anim.play(); btn.innerHTML = '&#9208; 暂停'; } else { anim.pause(); btn.innerHTML = '&#9654; 播放'; } }
+function doReplay() { if (anim) { anim.goToAndPlay(0, true); document.getElementById('btnToggle').innerHTML = '&#9208; 暂停'; } }
+function ss(s) { if (anim) anim.setSpeed(s); document.querySelectorAll('.sp button').forEach(function(b) { b.classList.remove('active'); }); var btnId = 's' + s; var btn = document.getElementById(btnId); if (btn) btn.classList.add('active'); }
+__DOWNLOAD_JS__
 function loadCdn(cb) { var s = document.createElement('script'); s.src = CDN_URLS[cdnIdx]; s.onload = function() { cb(null); }; s.onerror = function() { cdnIdx++; if (cdnIdx < CDN_URLS.length) { loadCdn(cb); } else { cb(new Error('所有CDN均失败')); } }; document.head.appendChild(s); }
-function loadFileSaver(cb) { var fsIdx = 0; function tryNext() { var s = document.createElement('script'); s.src = FSAVER_URLS[fsIdx]; s.onload = function() { cb(null); }; s.onerror = function() { fsIdx++; if (fsIdx < FSAVER_URLS.length) { tryNext(); } else { cb(new Error('FileSaver CDN 失败（降级使用原生下载）')); } }; document.head.appendChild(s); } tryNext(); }
+__LOAD_FILESAVER_JS__
 function initAnimation() {
   try {
     anim = lottie.loadAnimation({ container: document.getElementById('lc'), renderer: 'svg', loop: true, autoplay: true, animationData: jsonData });
@@ -1989,14 +2007,15 @@ function initAnimation() {
 
 __BOOTSTRAP__
 </script>
-</body></html>'''.replace('__TITLE__', title).replace('__JSON_LINE__', json_line).replace('__BOOTSTRAP__', bootstrap).replace('__LIB_SCRIPTS__', lib_scripts)
+</body></html>'''.replace('__TITLE__', title).replace('__JSON_LINE__', json_line).replace('__BOOTSTRAP__', bootstrap).replace('__LIB_SCRIPTS__', lib_scripts).replace('__DOWNLOAD_CONTROLS__', download_controls).replace('__DOWNLOAD_CSS__', download_css).replace('__DOWNLOAD_JS__', download_js).replace('__FSAVER_URLS__', fsaver_urls).replace('__LOAD_FILESAVER_JS__', load_filesaver_js)
 
 def stage_preview(output, output_dir):
-    """Stage 5: 生成 fetch + embedded 预览
-    embedded 版本引用本地 lottie.min.js 和 FileSaver.min.js，避免 CDN 失败导致无法预览
+    """Stage 5: 生成 fetch + embedded 预览。
+    preview_player.html 给本地工具 iframe 使用，只播放不下载。
     """
     preview_fetch = os.path.join(output_dir, 'preview.html')
     preview_embedded = os.path.join(output_dir, 'preview_embedded.html')
+    preview_player = os.path.join(output_dir, 'preview_player.html')
     json_str = json.dumps(output, ensure_ascii=False, separators=(',', ':'))
     
     # 下载依赖库到本地，供 embedded 版本引用（无需联网）
@@ -2017,11 +2036,13 @@ def stage_preview(output, output_dir):
         f.write(_build_preview_html('fetch'))
     with open(preview_embedded, 'w', encoding='utf-8') as f:
         f.write(_build_preview_html('embedded', json_str))
+    with open(preview_player, 'w', encoding='utf-8') as f:
+        f.write(_build_preview_html('embedded', json_str, with_download=False))
     
     return preview_fetch, preview_embedded
 
 def stage_preview_check(preview_fetch, preview_embedded):
-    """Stage 5 自检：FileSaver 逻辑齐全 + JSON 大小显示"""
+    """Stage 5 自检：独立预览下载可用，本地工具 iframe 预览不放下载入口。"""
     for label, path in [('fetch', preview_fetch), ('embedded', preview_embedded)]:
         with open(path, encoding='utf-8') as f:
             content = f.read()
@@ -2034,7 +2055,28 @@ def stage_preview_check(preview_fetch, preview_embedded):
         failed = [k for k, v in checks.items() if not v]
         if failed:
             _fail(5, f'[{label}] 缺少 {failed}')
-    _ok(5, f'预览生成 fetch + embedded，FileSaver 逻辑齐全')
+
+        fn_start = content.find('function dlJson')
+        fn_end = content.find('function loadCdn', fn_start)
+        if fn_start < 0 or fn_end < 0:
+            _fail(5, f'[{label}] 缺少全局 dlJson 下载函数')
+        dl_block = content[fn_start:fn_end]
+        saveas_i = dl_block.find('saveAs(blob, filename)')
+        native_i = dl_block.find('nativeDownload(blob, filename)')
+        if not (0 <= saveas_i < native_i):
+            _fail(5, f'[{label}] 独立预览下载顺序错误，必须为 FileSaver.saveAs -> nativeDownload')
+
+    preview_player = os.path.join(os.path.dirname(preview_embedded), 'preview_player.html')
+    if not os.path.exists(preview_player):
+        _fail(5, '缺少本地工具专用 preview_player.html')
+    with open(preview_player, encoding='utf-8') as f:
+        player_content = f.read()
+    if 'dlJson' in player_content or 'download-name' in player_content or 'FileSaver.min.js' in player_content:
+        _fail(5, 'preview_player.html 必须只保留播放控制，不应包含下载入口或 FileSaver')
+    if '__JSON_SIZE__' not in player_content or 'lottie.min.js' not in player_content:
+        _fail(5, 'preview_player.html 缺少播放预览必要内容')
+
+    _ok(5, f'预览生成 fetch + embedded + player，独立预览下载和工具纯播放预览均通过')
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -1,7 +1,7 @@
 ---
 name: jd-campaign-head-img-motion
 description: 京东会场头图 Lottie 动效延展，将 2-4 个静帧 Lottie JSON 合并为带切帧动效的循环 Lottie JSON，支持 Figma 插件导出的 [Clip Mask + Content] 画布包装，分阶段流水线架构，自动分组+弹性动效+预览模板。
-version: "9.8.0"
+version: "9.8.1"
 author: honghaoxiang
 agent_created: true
 trigger:
@@ -53,7 +53,7 @@ python scripts/generate_merged_lottie_pipeline.py a.json b.json c.json output/ -
 - 地址：`http://127.0.0.1:8787/`（端口被占用时自动顺延）
 - 结果：保存在 `tools/head_img_motion_tool/runs/`
 - 流程：先选择 2-4 个静态 JSON，在静态画面中可选标记装饰元素或突出元素，最后生成动效预览；生成后仍可继续修改静态标记并再次生成
-- 下载：在动效预览面板内输入文件名并下载 JSON，预览页使用内嵌数据和本地依赖，避免 `file://` 或 CDN 影响
+- 下载：本地工具页外层提供“保存 JSON”按钮，调用本地 Python 服务端弹出系统保存窗口并复制最终 `merged_output.json`；iframe 里的动效预览只负责播放，不承担保存职责
 
 ## 分阶段流水线架构（核心）
 
@@ -67,7 +67,7 @@ python scripts/generate_merged_lottie_pipeline.py a.json b.json c.json output/ -
 | 3 Keyframes | 蓄力+overshoot+bounce · 位移+旋转+opacity策略 | `pipeline/03_keyframes.json` | kf递增 · 维度 · opacity策略 |
 | 4 Hold Anim | **展示阶段动效**：装饰元素持续晃动 + 突出元素脉冲 | `pipeline/04_hold_anim.json` | 晃动关键帧插入 · 脉冲关键帧 |
 | 5 Assemble | 图层排序 · ind编号 · 循环锚点 · refId验证 | `merged_output.json` | refId · 循环锚点 |
-| 6 Preview | 单一模板 fetch/embedded · 自检 | `preview.html` + `preview_embedded.html` | saveAs · FileSaver · 降级方案 · JSON大小 |
+| 6 Preview | 单一模板 fetch/embedded/player · 自检 | `preview.html` + `preview_embedded.html` + `preview_player.html` | 独立预览 FileSaver 下载 · 工具 iframe 纯播放 · JSON大小 |
 
 **局部重跑**（调参时不全跑）：
 ```bash
@@ -297,14 +297,14 @@ T_HIGHLIGHT_SCALE   = (1.00, 1.20)  # 缩放幅度
 - ▶/⏸ 播放/暂停切换
 - 🔄 重播
 - ⏩ 0.5x / 1x / 2x 速度切换
-- 📥 下载 JSON（`saveAs` 本地依赖 + 原生 `createObjectURL` 降级方案）
+- 📥 保存 JSON：本地工具页由服务端弹系统保存窗口；独立 `preview_embedded.html` 用 `FileSaver.saveAs()` + 原生 `createObjectURL` 兜底
 - 📊 实时帧数 + JSON 文件大小显示（`帧: 75 / 150  |  JSON: 226 KB`，≥1MB 自动切 MB）
 
 ### 模板固化方案
 
 1. **单一模板函数** `build_preview_html(mode, json_str)` — fetch/embedded 共用同一份 CSS+JS
 2. **本地依赖** — embedded 版本自动下载 `lottie.min.js` + `FileSaver.min.js` 到输出目录，彻底避免 CDN 失败问题
-3. **生成后自检** — 检查 saveAs/saveAs全局/降级方案/__JSON_SIZE__，缺任一项报错退出
+3. **生成后自检** — 检查独立预览的 `saveAs` / 原生降级 / `__JSON_SIZE__`；同时检查 `preview_player.html` 不包含下载入口或 FileSaver，确保本地工具 iframe 只负责播放
 4. **禁止手写预览 HTML** — 必须从脚本生成
 5. **⚠️ 展示预览必须用 `preview_embedded.html`** — `preview.html` 的 fetch 模式在 `file://` 协议下被浏览器拦截（Failed to fetch），会导致用户看到白屏/加载失败。所有给用户看的预览链接始终指向 `preview_embedded.html`
 
@@ -337,6 +337,8 @@ T_HIGHLIGHT_SCALE   = (1.00, 1.20)  # 缩放幅度
 | 非文案层使用透明度变化 | 花、人物、商品等会显得闪烁，削弱主体运动 | 只有文案层使用 opacity 动画，非文案层保持源 opacity 静态 |
 | opacity 触发点设为完整入画 | 贴边图层淡入区间过短，看起来像瞬间全显 | 用文案中心点到达画布边缘线或指定点位作为淡入/淡出触发 |
 | 手写预览 HTML | 丢 FileSaver 逻辑 | 必须从 `build_preview_html()` 生成 |
+| 在本地工具 iframe 里处理保存 | iframe、内嵌浏览器、浏览器下载设置会影响弹窗和下载行为 | 本地工具保存必须走外层工具页按钮 + `/save-json` 服务端系统保存窗口 |
+| 删除 `FileSaver.min.js` 或 `saveAs(blob, filename)` | 独立双击打开 `preview_embedded.html` 时需要它做下载兜底 | embedded 预览必须保留本地 `FileSaver.min.js` 和 `saveAs(blob, filename)` |
 
 ## 自定义配置
 
@@ -388,7 +390,7 @@ jd-lottie-anim-extension/
 
 ## 版本历史
 
-详见 `CHANGELOG.md`。当前版本 V9.8.0。
+详见 `CHANGELOG.md`。当前版本 V9.8.1。
 
 ## 排错速查
 

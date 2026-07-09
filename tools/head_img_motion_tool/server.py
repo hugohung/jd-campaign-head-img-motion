@@ -11,6 +11,7 @@ import json
 import math
 import mimetypes
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -471,6 +472,18 @@ INDEX_HTML = r"""<!doctype html>
       word-break: break-all;
       margin-top: 5px;
     }
+    .save-box {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .save-box input[type="text"] {
+      width: 150px;
+      min-height: 38px;
+      padding: 8px 10px;
+    }
     iframe {
       width: 100%;
       height: 100%;
@@ -545,6 +558,10 @@ INDEX_HTML = r"""<!doctype html>
           <div class="result-title" id="result-title">还没有生成结果</div>
           <div class="result-path" id="result-path"></div>
         </div>
+        <div id="save-box" class="save-box hidden">
+          <input id="save-name" type="text" value="会场头图" aria-label="保存文件名">
+          <button id="save-json" type="button">保存 JSON</button>
+        </div>
       </div>
       <div id="visual-picker" class="visual-picker hidden">
         <div class="visual-top">
@@ -581,11 +598,15 @@ INDEX_HTML = r"""<!doctype html>
     const sceneTabs = document.getElementById('scene-tabs');
     const staticStage = document.getElementById('static-stage');
     const layerMenu = document.getElementById('layer-menu');
+    const saveBox = document.getElementById('save-box');
+    const saveNameInput = document.getElementById('save-name');
+    const saveJsonBtn = document.getElementById('save-json');
 
     let analyzedScenes = [];
     let sourceSceneJsons = [];
     let activeSceneIndex = 0;
     let staticAnimation = null;
+    let currentRunId = '';
     const selectedTypes = new Map();
 
     function setStatus(text, isError=false) {
@@ -596,6 +617,13 @@ INDEX_HTML = r"""<!doctype html>
     function filesAreValid() {
       const count = scenesInput.files.length;
       return count >= 2 && count <= 4;
+    }
+
+    function cleanSaveName(value) {
+      let name = (value || '会场头图').replace(/[\\/:*?"<>|]/g, '-').trim();
+      if (!name) name = '会场头图';
+      if (!/\.json$/i.test(name)) name += '.json';
+      return name;
     }
 
     function collectSelections() {
@@ -944,6 +972,37 @@ INDEX_HTML = r"""<!doctype html>
 
     analyzeBtn.addEventListener('click', analyzeCandidates);
 
+    saveJsonBtn.addEventListener('click', async () => {
+      if (!currentRunId) {
+        setStatus('请先生成动效，再保存 JSON。', true);
+        return;
+      }
+      const filename = cleanSaveName(saveNameInput.value);
+      saveNameInput.value = filename;
+      saveJsonBtn.disabled = true;
+      setStatus('请选择保存位置...');
+      try {
+        const response = await fetch('/save-json', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ run_id: currentRunId, filename })
+        });
+        const data = await response.json();
+        if (!response.ok || !data.ok) {
+          throw new Error(data.error || '保存失败');
+        }
+        if (data.canceled) {
+          setStatus('已取消保存。');
+        } else {
+          setStatus('已保存 JSON：' + data.path);
+        }
+      } catch (error) {
+        setStatus(error.message, true);
+      } finally {
+        saveJsonBtn.disabled = false;
+      }
+    });
+
     document.addEventListener('click', (event) => {
       if (!layerMenu.contains(event.target)) hideLayerMenu();
     });
@@ -973,15 +1032,19 @@ INDEX_HTML = r"""<!doctype html>
           throw new Error(data.error || '生成失败');
         }
         const cacheBust = '?t=' + Date.now();
+        currentRunId = data.run_id || '';
         preview.src = data.preview_url + cacheBust;
         preview.classList.remove('hidden');
+        saveBox.classList.remove('hidden');
         titleEl.textContent = '动效预览';
-        pathEl.textContent = '可继续修改上方静态标记，然后再次生成。JSON 下载在预览面板内完成。';
+        pathEl.textContent = '可继续修改上方静态标记，然后再次生成。保存 JSON 使用右上角按钮。';
         logEl.textContent = data.log || '';
-        setStatus('生成完成。可在下方预览动效并下载 JSON；也可以继续调整静态标记后再次生成。');
+        setStatus('生成完成。可预览动效、保存 JSON，也可以继续调整静态标记后再次生成。');
       } catch (error) {
+        currentRunId = '';
         preview.removeAttribute('src');
         preview.classList.add('hidden');
+        saveBox.classList.add('hidden');
         titleEl.textContent = '生成失败';
         pathEl.textContent = '';
         setStatus(error.message, true);
@@ -993,8 +1056,10 @@ INDEX_HTML = r"""<!doctype html>
     form.addEventListener('reset', () => {
       setTimeout(() => {
         clearVisualSelection();
+        currentRunId = '';
         preview.removeAttribute('src');
         preview.classList.add('hidden');
+        saveBox.classList.add('hidden');
         logEl.classList.add('hidden');
         titleEl.textContent = '还没有生成结果';
         pathEl.textContent = '';
@@ -1033,12 +1098,14 @@ class MotionToolHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path not in ("/generate", "/analyze"):
+        if parsed.path not in ("/generate", "/analyze", "/save-json"):
             self.send_error(404, "Not found")
             return
         try:
             if parsed.path == "/analyze":
                 result = self._handle_analyze()
+            elif parsed.path == "/save-json":
+                result = self._handle_save_json()
             else:
                 result = self._handle_generate()
             self._send_json(result)
@@ -1126,17 +1193,51 @@ class MotionToolHandler(BaseHTTPRequestHandler):
 
         merged = output_dir / "merged_output.json"
         preview = output_dir / "preview_embedded.html"
+        player_preview = output_dir / "preview_player.html"
         if not merged.exists() or not preview.exists():
             raise RuntimeError("流水线完成但缺少 merged_output.json 或 preview_embedded.html。")
+        tool_preview = player_preview if player_preview.exists() else preview
 
         return {
             "ok": True,
             "run_id": run_id,
             "output_dir": str(output_dir),
             "json_url": f"/runs/{run_id}/output/merged_output.json",
-            "preview_url": f"/runs/{run_id}/output/preview_embedded.html",
+            "preview_url": f"/runs/{run_id}/output/{tool_preview.name}",
+            "standalone_preview_url": f"/runs/{run_id}/output/preview_embedded.html",
             "log": log,
         }
+
+    def _handle_save_json(self) -> dict:
+        content_length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(content_length)
+        try:
+            payload = json.loads(body.decode("utf-8") if body else "{}")
+        except json.JSONDecodeError as exc:
+            raise ValueError("保存请求格式不正确。") from exc
+
+        run_id = str(payload.get("run_id", "")).strip()
+        if not run_id or "/" in run_id or "\\" in run_id or ".." in run_id:
+            raise ValueError("无效的生成结果编号。")
+
+        source = (RUNS_DIR / run_id / "output" / "merged_output.json").resolve()
+        runs_root = RUNS_DIR.resolve()
+        if source != runs_root and runs_root not in source.parents:
+            raise ValueError("无效的生成结果路径。")
+        if not source.is_file():
+            raise FileNotFoundError("找不到可保存的 merged_output.json，请重新生成。")
+
+        filename = sanitize_json_filename(str(payload.get("filename", "会场头图.json")))
+        save_path = ask_save_json_path(filename)
+        if not save_path:
+            return {"ok": True, "canceled": True}
+
+        target = Path(save_path)
+        if target.suffix.lower() != ".json":
+            target = target.with_name(target.name + ".json")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+        return {"ok": True, "canceled": False, "path": str(target)}
 
     def _serve_run_file(self, path: str, query: str) -> None:
         rel = unquote(path[len("/runs/") :])
@@ -1186,6 +1287,45 @@ class MotionToolHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
+
+
+def sanitize_json_filename(value: str) -> str:
+    name = Path(value or "会场头图.json").name.strip()
+    for ch in '\\/:*?"<>|':
+        name = name.replace(ch, "-")
+    if not name:
+        name = "会场头图.json"
+    if not name.lower().endswith(".json"):
+        name += ".json"
+    return name
+
+
+def ask_save_json_path(initial_file: str) -> str:
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except Exception as exc:  # noqa: BLE001 - local tool fallback
+        raise RuntimeError("当前环境无法打开系统保存窗口，请使用预览页内的下载兜底。") from exc
+
+    initial_dir = Path.home() / "Downloads"
+    if not initial_dir.exists():
+        initial_dir = Path.home()
+
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    root.update()
+    try:
+        return filedialog.asksaveasfilename(
+            parent=root,
+            title="保存 Lottie JSON",
+            initialdir=str(initial_dir),
+            initialfile=initial_file,
+            defaultextension=".json",
+            filetypes=[("Lottie JSON", "*.json"), ("All files", "*.*")],
+        )
+    finally:
+        root.destroy()
 
 
 def get_lottie_player_path() -> Path:
