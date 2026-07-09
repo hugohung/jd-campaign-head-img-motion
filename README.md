@@ -1,6 +1,6 @@
 # 京东会场头图 Lottie 动效延展 (jd-campaign-head-img-motion)
 
-> 将 2-4 个静帧 Lottie JSON 合并为带切帧动效的循环 Lottie JSON，自动识别静态图层并生成平滑的入场/退场动画。支持 Figma 插件导出的顶层 `Clip Mask + Content` 画布包装。
+> 将 2-4 个静帧 Lottie JSON 合并为带切帧动效的循环 Lottie JSON，自动识别静态图层并生成平滑的入场/退场动画。也支持从设计工具导出的静态 JSON。
 
 ## 效果演示
 
@@ -10,12 +10,12 @@
 
 - 🎯 **自动识别静态图层** — 背景、腰封等不变元素自动保持不动
 - 🧩 **支持 2-4 个画面** — 旧的双图输入继续可用，也可输入 3/4 个静态 JSON 生成多段循环
-- 🎨 **Figma 导出兼容** — 自动展开顶层 `Clip Mask + Content`，把 `Content` comp 作为真实动效图层来源
+- 🎨 **设计稿导出兼容** — 支持常见设计工具导出的静态 JSON，并自动适配画布与真实图层
 - 🫧 **文案透明度编排** — 文案层以中心点到达画布边缘或指定点位触发渐现/渐隐，非文案元素保持源透明度
 - ✨ **智能方向分配** — 根据元素在画布中的位置，自动选择入场/退场方向（左/右/下/中）
 - 🎬 **专业动效参数** — 弹性缓动曲线 + 过冲回弹效果 + 垂直错帧延迟
 - 🔗 **完整属性保留** — parent 父子关系、旋转、锚点、混合模式全部保留
-- 📦 **即开即用预览** — 自动生成含播放控制 + 下载按钮的 HTML 预览页
+- 📦 **即开即用预览** — 自动生成含播放控制、文件命名和下载按钮的 HTML 预览页
 - 🔄 **无缝循环** — 首尾帧状态完全一致，循环播放无跳变
 
 ## 快速开始
@@ -25,6 +25,9 @@
 # 1. 下载 Release zip
 # 2. WorkBuddy → 技能管理 → 上传技能
 
+# 本地工具模式（不通过 AI 对话）
+tools/head_img_motion_tool/start_tool.bat
+
 # 使用
 python scripts/generate_merged_lottie_pipeline.py <场景A.json> <场景B.json> [场景C.json] [场景D.json] [输出目录]
 
@@ -32,6 +35,18 @@ python scripts/generate_merged_lottie_pipeline.py <场景A.json> <场景B.json> 
 # 本地直接打开 preview_embedded.html；或起服务查看 preview.html
 cd 输出目录 && python -m http.server 8770
 ```
+
+## 本地工具模式
+
+双击 `tools/head_img_motion_tool/start_tool.bat` 会启动本地网页工具：
+
+```text
+http://127.0.0.1:8787/
+```
+
+工具页支持上传 2-4 个静态 JSON，先渲染静态画面，再在画面中可选标记装饰元素或突出元素，最后生成 Lottie。标记不是必选项；装饰元素会在画面停留阶段循环轻微浮动，突出元素会做缩放强调。生成后仍可回到静态标记区继续调整，再重新生成一次。
+
+动效预览面板内提供文件命名和 JSON 下载，不需要在工具面板里重复下载。
 
 ## 输入输出
 
@@ -47,7 +62,7 @@ cd 输出目录 && python -m http.server 8770
 - 2-4 个 Lottie JSON 文件
 - 尺寸相同（宽 × 高一致）
 - 背景层相同或相近，前景层不同
-- Figma 插件导出的顶层 `Clip Mask + Content` 会自动展开
+- 支持设计工具导出的静态 JSON
 
 ## 工作原理
 
@@ -127,13 +142,13 @@ jd-campaign-head-img-motion/
 
 ## 版本历史
 
-查看 [SKILL.md](./SKILL.md) 中的版本历史表格。
+查看 [CHANGELOG.md](./CHANGELOG.md)。
 
 ## 技术栈
 
 - Python 3.12+ (无第三方依赖)
-- lottie-web 5.12.x (CDN 加载)
-- FileSaver.js 2.0.x (CDN 加载)
+- lottie-web 5.12.x
+- FileSaver.js 2.0.x
 - Lottie JSON 格式 (5.6+)
 
 ## License

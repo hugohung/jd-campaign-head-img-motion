@@ -1908,6 +1908,7 @@ button:hover{background:#3a3a6a}
 .sp button{background:#222}.sp button.active{background:#5a5aff;border-color:#5a5aff}
 #dl-btn{background:#1a4a2a;border-color:#2a7a4a;color:#7ef5a0}
 #dl-btn:hover{background:#1e5a32}
+#download-name{height:34px;width:150px;border:1px solid #555;border-radius:6px;background:#111827;color:#eee;padding:0 10px;font-size:13px}
 #fi,#st{font-size:13px;margin-top:10px;min-height:20px}
 </style></head>
 <body>
@@ -1921,6 +1922,7 @@ button:hover{background:#3a3a6a}
     <button onclick="ss(1)" id="s1" class="active">1x</button>
     <button onclick="ss(2)" id="s2">2x</button>
   </div>
+  <input id="download-name" type="text" value="会场头图" aria-label="下载文件名">
   <button id="dl-btn" onclick="dlJson()">&#11015; 下载 JSON</button>
 </div>
 <div id="fi"></div>
@@ -1939,12 +1941,39 @@ var cdnIdx = 0;
 function doToggle() { if (!anim) return; var btn = document.getElementById('btnToggle'); if (anim.isPaused) { anim.play(); btn.innerHTML = '&#9208; 暂停'; } else { anim.pause(); btn.innerHTML = '&#9654; 播放'; } }
 function doReplay() { if (anim) { anim.goToAndPlay(0, true); document.getElementById('btnToggle').innerHTML = '&#9208; 暂停'; } }
 function ss(s) { if (anim) anim.setSpeed(s); document.querySelectorAll('.sp button').forEach(function(b) { b.classList.remove('active'); }); var btnId = 's' + s; var btn = document.getElementById(btnId); if (btn) btn.classList.add('active'); }
+function cleanFileName(value) {
+  value = (value || '会场头图').replace(/[\\/:*?"<>|]/g, '-').trim();
+  if (!value) value = '会场头图';
+  if (!/\\.json$/i.test(value)) value += '.json';
+  return value;
+}
+function nativeDownload(blob, filename) {
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.rel = 'noopener';
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function() {
+    if (a.parentNode) document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, 2000);
+}
 function dlJson() {
   if (!jsonData) { alert('JSON 尚未加载完成'); return; }
+  var filename = cleanFileName((document.getElementById('download-name') || {}).value);
   var data = JSON.stringify(jsonData, null, 2);
   var blob = new Blob([data], {type: 'application/json;charset=utf-8'});
-  if (typeof saveAs === 'function') { saveAs(blob, 'merged_output.json'); }
-  else { var url = URL.createObjectURL(blob); var a = document.createElement('a'); a.href = url; a.download = 'merged_output.json'; document.body.appendChild(a); a.click(); setTimeout(function() { if (a.parentNode) document.body.removeChild(a); URL.revokeObjectURL(url); }, 2000); }
+  try {
+    nativeDownload(blob, filename);
+    st.style.color = '#7ef5a0';
+    st.textContent = '已开始下载 ' + filename;
+  } catch (err) {
+    if (typeof saveAs === 'function') { saveAs(blob, filename); }
+    else { alert('下载失败：' + err.message); }
+  }
 }
 function loadCdn(cb) { var s = document.createElement('script'); s.src = CDN_URLS[cdnIdx]; s.onload = function() { cb(null); }; s.onerror = function() { cdnIdx++; if (cdnIdx < CDN_URLS.length) { loadCdn(cb); } else { cb(new Error('所有CDN均失败')); } }; document.head.appendChild(s); }
 function loadFileSaver(cb) { var fsIdx = 0; function tryNext() { var s = document.createElement('script'); s.src = FSAVER_URLS[fsIdx]; s.onload = function() { cb(null); }; s.onerror = function() { fsIdx++; if (fsIdx < FSAVER_URLS.length) { tryNext(); } else { cb(new Error('FileSaver CDN 失败（降级使用原生下载）')); } }; document.head.appendChild(s); } tryNext(); }

@@ -1,7 +1,7 @@
 ---
 name: jd-campaign-head-img-motion
 description: 京东会场头图 Lottie 动效延展，将 2-4 个静帧 Lottie JSON 合并为带切帧动效的循环 Lottie JSON，支持 Figma 插件导出的 [Clip Mask + Content] 画布包装，分阶段流水线架构，自动分组+弹性动效+预览模板。
-version: "9.7.2"
+version: "9.8.0"
 author: honghaoxiang
 agent_created: true
 trigger:
@@ -22,6 +22,9 @@ trigger:
 ## 快速执行
 
 ```bash
+# 本地工具模式（不通过 AI 对话，适合日常批量使用）
+tools/head_img_motion_tool/start_tool.bat
+
 # 基本用法（无展示阶段动效，支持 2-4 个 JSON）
 python scripts/generate_merged_lottie_pipeline.py <场景A.json> <场景B.json> [场景C.json] [场景D.json] [输出目录]
 
@@ -41,6 +44,16 @@ python scripts/generate_merged_lottie_pipeline.py a.json b.json c.json output/ -
 6. **`--deco`**：装饰元素 `A_8,A_9,B_5,C_8,D_3`（画面+图层原始索引，A-D 最多四屏）
 7. **`--highlight`**：突出元素 `A_5:scale,C_4:scale`
 7. **⚠️ 展示预览用 `preview_embedded.html`**：fetch 版在 `file://` 下会 Failed to fetch，给用户看只给 embedded 版
+
+## 无 AI 工具模式
+
+`tools/head_img_motion_tool/` 是本地网页工具封装。它复用同一个 Python 流水线脚本，但把上传、静态画面标记、动效生成、预览和下载放到本地 HTTP 服务里，日常生成不需要通过 AI 对话。
+
+- 启动：双击 `tools/head_img_motion_tool/start_tool.bat`
+- 地址：`http://127.0.0.1:8787/`（端口被占用时自动顺延）
+- 结果：保存在 `tools/head_img_motion_tool/runs/`
+- 流程：先选择 2-4 个静态 JSON，在静态画面中可选标记装饰元素或突出元素，最后生成动效预览；生成后仍可继续修改静态标记并再次生成
+- 下载：在动效预览面板内输入文件名并下载 JSON，预览页使用内嵌数据和本地依赖，避免 `file://` 或 CDN 影响
 
 ## 分阶段流水线架构（核心）
 
@@ -375,7 +388,7 @@ jd-lottie-anim-extension/
 
 ## 版本历史
 
-详见 `CHANGELOG.md`。当前版本 V9.7.2。
+详见 `CHANGELOG.md`。当前版本 V9.8.0。
 
 ## 排错速查
 

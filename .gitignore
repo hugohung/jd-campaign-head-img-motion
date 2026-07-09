@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+
+tools/head_img_motion_tool/__pycache__/
+tools/head_img_motion_tool/analyze_cache/
+tools/head_img_motion_tool/runs/
+tools/head_img_motion_tool/server-test.out.log
+tools/head_img_motion_tool/server-test.err.log
+
