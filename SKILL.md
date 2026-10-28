@@ -2,7 +2,7 @@
 name: jd-campaign-head-img-motion
 description: 京东会场头图 Lottie 动效延展，将 2-4 个静帧 Lottie JSON 合并为带切帧动效的循环 Lottie JSON，支持 Figma 插件导出的 [Clip Mask + Content] 画布包装，分阶段流水线架构，自动分组+弹性动效+预览模板。
 version: "9.8.1"
-author: honghaoxiang
+author: hugohung
 agent_created: true
 trigger:
   - Lottie动效
